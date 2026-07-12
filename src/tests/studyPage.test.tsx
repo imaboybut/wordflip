@@ -50,26 +50,31 @@ describe('단순 탭 학습 화면', () => {
     expect(appStore.getState().schedules.get('c1')?.lastRating).toBe('good');
   });
 
-  it('카드 탭은 모름+뜻 공개, 다음 카드 탭은 이동으로 동작한다', async () => {
+  it('카드 탭은 평가 없이 뜻을 공개하고 네 FSRS 버튼을 표시한다', async () => {
     const user = userEvent.setup();
     render(<StudyPage />);
     const card = screen.getByTestId('study-card');
 
     await user.click(card);
-    await waitFor(() => expect(appStore.getState().awaitingAdvance).toBe(true));
+    await waitFor(() => expect(appStore.getState().flipped).toBe(true));
     expect(appStore.getState()).toMatchObject({
       currentCardId: 'c1',
       flipped: true,
-      studyStep: 1,
+      studyStep: 0,
     });
-    expect(appStore.getState().schedules.get('c1')?.lastRating).toBe('again');
-    expect(screen.queryByText('Good')).not.toBeInTheDocument();
+    expect(appStore.getState().schedules.has('c1')).toBe(false);
+    expect(await db.reviewLogs.count()).toBe(0);
+    expect(screen.getByText('Again')).toBeInTheDocument();
+    expect(screen.getByText('Hard')).toBeInTheDocument();
+    expect(screen.getByText('Good')).toBeInTheDocument();
+    expect(screen.getByText('Easy')).toBeInTheDocument();
 
-    await user.click(screen.getByTestId('study-card'));
-    expect(appStore.getState()).toMatchObject({
+    await user.click(screen.getByText('Again'));
+    await waitFor(() => expect(appStore.getState()).toMatchObject({
       currentCardId: 'c2',
       flipped: false,
-      awaitingAdvance: false,
-    });
+      studyStep: 1,
+    }));
+    expect(appStore.getState().schedules.get('c1')?.lastRating).toBe('again');
   });
 });

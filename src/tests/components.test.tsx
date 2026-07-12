@@ -23,7 +23,7 @@ describe('StudyCard', () => {
       <StudyCard card={card} flipped={false} animationsEnabled={false} onFlip={onFlip} />,
     );
     expect(screen.getAllByText('steadily').length).toBeGreaterThan(0);
-    expect(screen.getByText('모르면 카드를 눌러 뜻 보기')).toBeInTheDocument();
+    expect(screen.getByText('카드를 눌러 뜻 보기')).toBeInTheDocument();
 
     await userEvent.click(screen.getByTestId('study-card'));
     expect(onFlip).toHaveBeenCalledTimes(1);
@@ -92,13 +92,13 @@ describe('RatingButtons', () => {
   it('네 버튼이 한국어 보조 문구와 함께 표시된다', () => {
     render(<RatingButtons disabled={false} onRate={() => {}} />);
     expect(screen.getByText('Again')).toBeInTheDocument();
-    expect(screen.getByText('다시')).toBeInTheDocument();
+    expect(screen.getByText('모름')).toBeInTheDocument();
     expect(screen.getByText('Hard')).toBeInTheDocument();
-    expect(screen.getByText('어려움')).toBeInTheDocument();
+    expect(screen.getByText('힘들게 기억')).toBeInTheDocument();
     expect(screen.getByText('Good')).toBeInTheDocument();
-    expect(screen.getByText('알겠음')).toBeInTheDocument();
+    expect(screen.getByText('기억함')).toBeInTheDocument();
     expect(screen.getByText('Easy')).toBeInTheDocument();
-    expect(screen.getByText('쉬움')).toBeInTheDocument();
+    expect(screen.getByText('바로 기억')).toBeInTheDocument();
   });
 
   it('버튼으로 평가할 수 있다', async () => {
@@ -225,7 +225,7 @@ describe('SwipeCard 제스처', () => {
     const { zone } = renderSwipe(true);
     fireEvent.pointerDown(zone, { pointerId: 1, clientX: 400, clientY: 300, button: 0 });
     fireEvent.pointerMove(zone, { pointerId: 1, clientX: 320, clientY: 300 });
-    expect(screen.getByTestId('swipe-preview')).toHaveTextContent('Again — 다시');
+    expect(screen.getByTestId('swipe-preview')).toHaveTextContent('Again — 모름');
     fireEvent.pointerUp(zone, { pointerId: 1, clientX: 400, clientY: 300 });
   });
 });

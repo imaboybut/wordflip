@@ -9,6 +9,7 @@ import {
 } from '../queue/cardSelector';
 import {
   applyRating,
+  migrateLegacySchedulesToFsrs,
   rebuildSchedulesFromLogs,
   undoLastReview,
 } from '../services/reviewService';
@@ -16,6 +17,7 @@ import { seedIfEmpty, importCards, type ImportOptions } from '../services/import
 import { parseWordsCsv } from '../services/csvService';
 import { restoreBackup, wipeAllData } from '../services/backupService';
 import { appStore, type AppState } from './appStore';
+import { clampDesiredRetention } from '../scheduler/fsrsAdapter';
 
 const { getState, setState } = appStore;
 
@@ -46,6 +48,9 @@ export async function initApp(): Promise<void> {
 
     const seedUrl = `${import.meta.env.BASE_URL}data/words.csv`;
     const seedReport = await seedIfEmpty(activeDb, seedUrl);
+    // v1/v2의 step 스케줄은 reviewLogs.reviewedAt을 실제 시간 입력으로 사용해
+    // FSRS 상태로 한 번만 변환한다.
+    await migrateLegacySchedulesToFsrs(activeDb);
 
     const [cards, schedules] = await Promise.all([
       activeDb.cards.toArray(),
@@ -84,7 +89,7 @@ export async function initApp(): Promise<void> {
       recentIds,
       reviewStreak,
       ratingCounts,
-      settings: { ...DEFAULT_SETTINGS, ...settings },
+      settings: normalizeSettings(settings),
       newOrderSeed: seed,
       seedReport: seedReport ?? savedReport,
       canUndo: lastUndo !== null,
@@ -99,10 +104,9 @@ export async function initApp(): Promise<void> {
       setState({
         mode: session.mode,
         currentCardId: session.currentCardId,
-        // 이전 버전에서 단순히 뒤집어 둔 카드는 평가 여부가 불명확하다.
-        // 새 흐름에서 저장한 대기 상태만 뒷면으로 안전하게 복원한다.
-        flipped: session.awaitingAdvance === true,
-        awaitingAdvance: session.awaitingAdvance === true,
+        // FSRS 흐름에서 카드 탭은 평가 없이 답만 공개하므로 안전하게 복원한다.
+        flipped: session.awaitingAdvance === true ? false : session.flipped,
+        awaitingAdvance: false,
         currentWasDue: session.currentWasDue,
         status: 'ready',
       });
@@ -183,6 +187,8 @@ export function advanceToNextCard(): void {
       currentCardId: cardId,
       flipped: false,
       awaitingAdvance: false,
+      nextDueAt: null,
+      nextReviewStep: null,
       currentWasDue: false,
     });
     persistSession();
@@ -190,14 +196,15 @@ export function advanceToNextCard(): void {
   }
 
   const result = selectNextCard({
+    nowMs: Date.now(),
     studyStep: state.studyStep,
     schedules: state.schedules,
     deckIds,
     newIds: newIdsFor(state, deckIds),
     recentIds: state.recentIds,
     avoidRecentCount: state.settings.avoidRecentCount,
-    reviewStreak: state.reviewStreak,
     currentCardId: state.currentCardId,
+    desiredRetention: state.settings.desiredRetention,
   });
 
   setState({
@@ -205,33 +212,27 @@ export function advanceToNextCard(): void {
     currentWasDue: result.isDueReview,
     flipped: false,
     awaitingAdvance: false,
+    nextDueAt: result.nextDueAt,
+    nextReviewStep: result.nextReviewStep,
   });
   persistSession();
 }
 
 export function flipCard(): void {
   const s = getState();
-  if (s.currentCardId === null || s.isRating || s.awaitingAdvance) return;
-  setState({ flipped: !s.flipped });
+  if (s.currentCardId === null || s.isRating || s.flipped) return;
+  setState({ flipped: true, awaitingAdvance: false });
   persistSession();
 }
 
 /**
- * 앞면을 눌렀을 때 뜻을 공개하고 즉시 Again(모름)을 저장한다.
- * 다음 카드는 아직 보여주지 않고, 뒷면을 한 번 더 누를 때까지 기다린다.
+ * 앞면을 눌렀을 때 뜻만 공개한다. 평가는 뒷면의 네 FSRS 버튼에서 수행한다.
  */
 export async function revealCurrentCardAsUnknown(): Promise<void> {
   const s = getState();
-  if (
-    s.currentCardId === null ||
-    s.flipped ||
-    s.awaitingAdvance ||
-    s.isRating
-  ) {
-    return;
-  }
+  if (s.currentCardId === null || s.flipped || s.isRating) return;
   setState({ flipped: true });
-  await commitCurrentRating('again', { allowFront: true, advance: false });
+  persistSession();
 }
 
 /** 앞면의 Good 버튼: 안다고 저장하고 곧바로 다음 카드로 이동한다. */
@@ -240,24 +241,11 @@ export async function markCurrentCardKnown(): Promise<void> {
   if (
     s.currentCardId === null ||
     s.flipped ||
-    s.awaitingAdvance ||
     s.isRating
   ) {
     return;
   }
-  await commitCurrentRating('good', { allowFront: true, advance: true });
-}
-
-/** 모름 처리 후 공개된 뒷면에서 다음 카드로 이동한다. */
-export function advanceAfterReveal(): void {
-  const s = getState();
-  if (!s.awaitingAdvance || s.isRating) return;
-  if (s.mode.type === 'browse') {
-    setState({
-      mode: { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 },
-    });
-  }
-  advanceToNextCard();
+  await commitCurrentRating('good', { allowFront: true });
 }
 
 /** browse 모드에서 평가 없이 다음 카드로 */
@@ -272,12 +260,11 @@ export function skipCard(): void {
 // ---------- 평가 ----------
 
 export async function rateCurrentCard(rating: Rating): Promise<void> {
-  await commitCurrentRating(rating, { allowFront: false, advance: true });
+  await commitCurrentRating(rating, { allowFront: false });
 }
 
 interface CommitRatingOptions {
   allowFront: boolean;
-  advance: boolean;
 }
 
 async function commitCurrentRating(
@@ -289,27 +276,18 @@ async function commitCurrentRating(
   if (
     s.currentCardId === null ||
     (!options.allowFront && !s.flipped) ||
-    s.awaitingAdvance ||
     s.isRating
   ) {
     return;
   }
   const cardId = s.currentCardId;
-  const sessionAfterRating: StudySession = options.advance
-    ? {
-        mode: s.mode,
-        currentCardId: null,
-        flipped: false,
-        currentWasDue: false,
-        awaitingAdvance: false,
-      }
-    : {
-        mode: s.mode,
-        currentCardId: cardId,
-        flipped: true,
-        currentWasDue: s.currentWasDue,
-        awaitingAdvance: true,
-      };
+  const sessionAfterRating: StudySession = {
+    mode: s.mode,
+    currentCardId: null,
+    flipped: false,
+    currentWasDue: false,
+    awaitingAdvance: false,
+  };
 
   setState({ isRating: true });
   try {
@@ -333,25 +311,12 @@ async function commitCurrentRating(
       canUndo: true,
     });
 
-    if (options.advance) {
-      if (s.mode.type === 'browse') {
-        const mode = { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 };
-        setState({ mode });
-      }
-      advanceToNextCard();
-    } else {
-      setState({
-        currentCardId: cardId,
-        flipped: true,
-        awaitingAdvance: true,
-      });
-      persistSession();
+    if (s.mode.type === 'browse') {
+      const mode = { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 };
+      setState({ mode });
     }
+    advanceToNextCard();
   } catch (err) {
-    if (!options.advance) {
-      setState({ flipped: false, awaitingAdvance: false });
-      persistSession();
-    }
     showToast(
       err instanceof Error ? err.message : '평가를 저장하지 못했습니다.',
     );
@@ -376,6 +341,7 @@ export async function undoLast(): Promise<void> {
 
     setState({
       schedules,
+      mode: outcome.studyMode ?? s.mode,
       studyStep: outcome.studyStep,
       recentIds: outcome.recentIds,
       reviewStreak: outcome.reviewStreak,
@@ -385,6 +351,8 @@ export async function undoLast(): Promise<void> {
       currentWasDue: false,
       flipped: false,
       awaitingAdvance: false,
+      nextDueAt: null,
+      nextReviewStep: null,
     });
     persistSession();
     showToast('마지막 평가를 되돌렸습니다.');
@@ -404,6 +372,8 @@ export function setStudyMode(mode: StudyMode): void {
     currentCardId: null,
     flipped: false,
     awaitingAdvance: false,
+    nextDueAt: null,
+    nextReviewStep: null,
     currentWasDue: false,
   });
   advanceToNextCard();
@@ -433,7 +403,7 @@ export async function toggleStar(cardId: string): Promise<void> {
 // ---------- 설정 ----------
 
 export async function updateSettings(patch: Partial<Settings>): Promise<void> {
-  const settings = { ...getState().settings, ...patch };
+  const settings = normalizeSettings({ ...getState().settings, ...patch });
   setState({ settings });
   try {
     await setMeta(activeDb, META_KEYS.settings, settings);
@@ -457,10 +427,12 @@ export async function upsertCard(card: Card): Promise<void> {
 export async function deleteCard(cardId: string): Promise<void> {
   await activeDb.transaction(
     'rw',
-    [activeDb.cards, activeDb.schedules],
+    [activeDb.cards, activeDb.schedules, activeDb.reviewLogs, activeDb.meta],
     async () => {
       await activeDb.cards.delete(cardId);
       await activeDb.schedules.delete(cardId);
+      await activeDb.reviewLogs.where('cardId').equals(cardId).delete();
+      await setMeta(activeDb, META_KEYS.lastUndo, null);
     },
   );
   const s = getState();
@@ -472,6 +444,7 @@ export async function deleteCard(cardId: string): Promise<void> {
     cards,
     schedules,
     deckOrder: s.deckOrder.filter((id) => id !== cardId),
+    canUndo: false,
   });
   if (s.currentCardId === cardId) advanceToNextCard();
 }
@@ -506,7 +479,7 @@ export async function resetAllData(): Promise<void> {
 export async function rebuildFromLogs(): Promise<string> {
   const result = await rebuildSchedulesFromLogs(activeDb);
   await reloadFromDb();
-  return `재계산 완료: 카드 ${result.schedules.length}개, studyStep ${result.studyStep}`;
+  return `FSRS 재계산 완료: 카드 ${result.schedules.length}개, 누적 평가 ${result.studyStep}회`;
 }
 
 async function reloadFromDb(): Promise<void> {
@@ -534,11 +507,23 @@ async function reloadFromDb(): Promise<void> {
     recentIds,
     reviewStreak,
     ratingCounts,
-    settings: { ...DEFAULT_SETTINGS, ...settings },
+    settings: normalizeSettings(settings),
     canUndo: false,
     currentCardId: null,
     flipped: false,
     awaitingAdvance: false,
+    nextDueAt: null,
+    nextReviewStep: null,
   });
   advanceToNextCard();
+}
+
+function normalizeSettings(settings: Partial<Settings> | null | undefined): Settings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    desiredRetention: clampDesiredRetention(
+      settings?.desiredRetention ?? DEFAULT_SETTINGS.desiredRetention,
+    ),
+  };
 }

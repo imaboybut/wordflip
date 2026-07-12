@@ -28,10 +28,10 @@ const TAP_DIST = 10;
 const TAP_TIME = 500;
 
 const RATING_LABEL: Record<Rating, string> = {
-  again: 'Again — 다시',
-  hard: 'Hard — 어려움',
-  good: 'Good — 알겠음',
-  easy: 'Easy — 쉬움',
+  again: 'Again — 모름',
+  hard: 'Hard — 힘들게 기억',
+  good: 'Good — 기억함',
+  easy: 'Easy — 바로 기억',
 };
 
 interface DragState {

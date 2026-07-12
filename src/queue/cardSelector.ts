@@ -1,114 +1,269 @@
+import { createFsrsAdapter, type FsrsAdapter } from '../scheduler/fsrsAdapter';
 import type { CardSchedule } from '../types';
 import type { SelectionResult, SelectorContext } from './queueTypes';
 
+const adapterCache = new Map<number, FsrsAdapter>();
+
 /**
- * 다음 카드를 고르는 순수 함수. 규칙:
- * 1. dueStep <= studyStep 인 복습 예정 카드 우선
- * 2. 단, 복습 카드가 연속 3장 나왔으면 다음 한 장은 신규 카드
- * 3. 신규 카드 소진 시 예정 카드 또는 가장 오래 보지 않은 카드
- * 4. 최근 N장(기본 5)에 나온 카드는 가능하면 제외, 대안이 없을 때만 허용
- * 5. 같은 카드의 즉시 연속 등장 금지 (카드가 한 장뿐인 경우 제외)
- * 6. due 카드가 여럿이면 오답 보너스를 주되, 오래 밀린 카드는 결국 추월
+ * FSRS 예정 시각을 지키며 다음 카드를 고르는 순수 함수.
+ *
+ * - dueAt 시간 바닥과 minReviewStep 간격을 모두 지킨다.
+ * - 학습/재학습 카드를 먼저, 일반 복습 카드는 낮은 회상 가능성 순으로 고른다.
+ * - 예정 카드가 없으면 신규 카드를 고른다.
+ * - 둘 다 없으면 미래 카드를 억지로 꺼내지 않고 다음 예정 시각만 돌려준다.
  */
 export function selectNextCard(ctx: SelectorContext): SelectionResult {
   const {
+    nowMs,
     studyStep,
     schedules,
     deckIds,
     newIds,
     recentIds,
     avoidRecentCount,
-    reviewStreak,
     currentCardId,
+    desiredRetention,
   } = ctx;
 
-  if (deckIds.length === 0) return { cardId: null, isDueReview: false, isNew: false };
+  if (deckIds.length === 0) return emptyResult(null);
 
   const deckSet = new Set(deckIds);
-  const avoid = new Set<string>(
-    avoidRecentCount > 0 ? recentIds.slice(-avoidRecentCount) : [],
+  const avoid = createAvoidSet(
+    recentIds,
+    avoidRecentCount,
+    currentCardId,
   );
+  const adapter = getAdapter(desiredRetention);
+
+  const dueCandidates = createCandidateGroup();
+  const stepGatedCandidates = createCandidateGroup();
+  let nextDueAt: number | null = null;
+  let nextReviewStep: number | null = null;
+
+  for (const schedule of schedules.values()) {
+    if (!deckSet.has(schedule.cardId) || !Number.isFinite(schedule.dueAt)) {
+      continue;
+    }
+
+    if (schedule.dueAt > nowMs) {
+      nextDueAt =
+        nextDueAt === null
+          ? schedule.dueAt
+          : Math.min(nextDueAt, schedule.dueAt);
+      continue;
+    }
+
+    if (schedule.minReviewStep > studyStep) {
+      nextReviewStep =
+        nextReviewStep === null
+          ? schedule.minReviewStep
+          : Math.min(nextReviewStep, schedule.minReviewStep);
+      considerDueCandidate(
+        stepGatedCandidates,
+        schedule,
+        avoid.has(schedule.cardId),
+        adapter,
+        nowMs,
+      );
+      continue;
+    }
+
+    considerDueCandidate(
+      dueCandidates,
+      schedule,
+      avoid.has(schedule.cardId),
+      adapter,
+      nowMs,
+    );
+  }
+
+  // 최근/현재 카드는 대안이 있을 때 피한다. 학습/재학습의 우선순위는
+  // 유지하되, 그 묶음이 전부 회피 대상이면 일반 복습의 새 카드를 택한다.
+  const duePick = pickDueCandidate(dueCandidates);
+  if (duePick !== null) {
+    return {
+      cardId: duePick,
+      isDueReview: true,
+      isNew: false,
+      nextDueAt: null,
+      nextReviewStep: null,
+    };
+  }
+
+  const newPick = selectNewCard(newIds, deckSet, avoid, currentCardId);
+  if (newPick !== null) {
+    return {
+      cardId: newPick,
+      isDueReview: false,
+      isNew: true,
+      nextDueAt: null,
+      nextReviewStep: null,
+    };
+  }
+
+  // 한 장짜리/별표 덱처럼 대안이 전혀 없으면 step gate만 완화한다.
+  // dueAt 시간 바닥은 이미 지났으므로 10분 전 즉시 반복은 생기지 않는다.
+  const gatedPick = pickDueCandidate(stepGatedCandidates);
+  if (gatedPick !== null) {
+    return {
+      cardId: gatedPick,
+      isDueReview: true,
+      isNew: false,
+      nextDueAt: null,
+      nextReviewStep: null,
+    };
+  }
+
+  return emptyResult(nextDueAt, nextReviewStep);
+}
+
+interface RankedReview {
+  schedule: CardSchedule;
+  retrievability: number;
+}
+
+interface DueCandidateGroup {
+  learning: CardSchedule | null;
+  learningUnavoided: CardSchedule | null;
+  review: RankedReview | null;
+  reviewUnavoided: RankedReview | null;
+}
+
+function createCandidateGroup(): DueCandidateGroup {
+  return {
+    learning: null,
+    learningUnavoided: null,
+    review: null,
+    reviewUnavoided: null,
+  };
+}
+
+function considerDueCandidate(
+  group: DueCandidateGroup,
+  schedule: CardSchedule,
+  isAvoided: boolean,
+  adapter: FsrsAdapter,
+  nowMs: number,
+): void {
+  if (isLearningState(schedule)) {
+    if (
+      group.learning === null ||
+      compareScheduleTieBreakers(schedule, group.learning) < 0
+    ) {
+      group.learning = schedule;
+    }
+    if (
+      !isAvoided &&
+      (group.learningUnavoided === null ||
+        compareScheduleTieBreakers(schedule, group.learningUnavoided) < 0)
+    ) {
+      group.learningUnavoided = schedule;
+    }
+    return;
+  }
+
+  const ranked: RankedReview = {
+    schedule,
+    retrievability: adapter.retrievability(schedule, nowMs),
+  };
+  if (group.review === null || compareRankedReview(ranked, group.review) < 0) {
+    group.review = ranked;
+  }
+  if (
+    !isAvoided &&
+    (group.reviewUnavoided === null ||
+      compareRankedReview(ranked, group.reviewUnavoided) < 0)
+  ) {
+    group.reviewUnavoided = ranked;
+  }
+}
+
+function pickDueCandidate(group: DueCandidateGroup): string | null {
+  return (
+    group.learningUnavoided?.cardId ??
+    group.reviewUnavoided?.schedule.cardId ??
+    group.learning?.cardId ??
+    group.review?.schedule.cardId ??
+    null
+  );
+}
+
+function getAdapter(desiredRetention: number): FsrsAdapter {
+  const key = Number.isFinite(desiredRetention) ? desiredRetention : 0.9;
+  const cached = adapterCache.get(key);
+  if (cached !== undefined) return cached;
+  const adapter = createFsrsAdapter(key, { enableFuzz: false });
+  adapterCache.set(key, adapter);
+  return adapter;
+}
+
+function createAvoidSet(
+  recentIds: readonly string[],
+  avoidRecentCount: number,
+  currentCardId: string | null,
+): Set<string> {
+  const count = Number.isFinite(avoidRecentCount)
+    ? Math.max(0, Math.trunc(avoidRecentCount))
+    : 0;
+  const avoid = new Set(count > 0 ? recentIds.slice(-count) : []);
   if (currentCardId !== null) avoid.add(currentCardId);
-
-  const dueCards = collectDue(schedules, deckSet, studyStep);
-  const freshNew = newIds.filter((id) => !avoid.has(id));
-
-  // 규칙 2: 복습 3연속 후에는 신규 카드 한 장
-  if (dueCards.length > 0 && reviewStreak >= 3 && freshNew.length > 0) {
-    return { cardId: freshNew[0], isDueReview: false, isNew: true };
-  }
-
-  // 규칙 1: due 카드 우선 (최근 반복 회피)
-  if (dueCards.length > 0) {
-    const pick =
-      dueCards.find((s) => !avoid.has(s.cardId)) ??
-      // 대안이 전혀 없으면 최근 카드 허용하되 즉시 연속만은 회피
-      dueCards.find((s) => s.cardId !== currentCardId);
-    if (pick) return { cardId: pick.cardId, isDueReview: true, isNew: false };
-    // due 카드가 현재 카드 하나뿐인 경우 → 아래 일반 규칙으로 진행
-  }
-
-  // 신규 카드
-  if (freshNew.length > 0) {
-    return { cardId: freshNew[0], isDueReview: false, isNew: true };
-  }
-  const anyNew = newIds.find((id) => id !== currentCardId);
-  if (anyNew !== undefined) {
-    return { cardId: anyNew, isDueReview: false, isNew: true };
-  }
-
-  // 신규도 due도 없음 → 가장 오래 보지 않은 카드
-  const seen = deckIds
-    .filter((id) => schedules.has(id))
-    .sort((a, b) => {
-      const la = schedules.get(a)?.lastReviewedStep ?? -1;
-      const lb = schedules.get(b)?.lastReviewedStep ?? -1;
-      return la - lb;
-    });
-  const pick =
-    seen.find((id) => !avoid.has(id)) ??
-    seen.find((id) => id !== currentCardId) ??
-    // 카드가 한 장뿐이면 그 카드라도 보여준다 (무한 루프 방지)
-    seen[0] ??
-    deckIds[0];
-
-  const stillDue = isDue(schedules.get(pick), studyStep);
-  return { cardId: pick, isDueReview: stillDue, isNew: !schedules.has(pick) };
+  return avoid;
 }
 
-function isDue(s: CardSchedule | undefined, studyStep: number): boolean {
-  return s !== undefined && s.dueStep <= studyStep;
+function isLearningState(schedule: CardSchedule): boolean {
+  return schedule.state === 'learning' || schedule.state === 'relearning';
 }
 
-function collectDue(
-  schedules: ReadonlyMap<string, CardSchedule>,
+function compareRankedReview(a: RankedReview, b: RankedReview): number {
+  const retrievabilityDifference = a.retrievability - b.retrievability;
+  return retrievabilityDifference !== 0
+    ? retrievabilityDifference
+    : compareScheduleTieBreakers(a.schedule, b.schedule);
+}
+
+function compareScheduleTieBreakers(
+  a: CardSchedule,
+  b: CardSchedule,
+): number {
+  if (a.dueAt !== b.dueAt) return a.dueAt - b.dueAt;
+  const aLastReview = a.lastReviewAt ?? Number.NEGATIVE_INFINITY;
+  const bLastReview = b.lastReviewAt ?? Number.NEGATIVE_INFINITY;
+  if (aLastReview !== bLastReview) return aLastReview - bLastReview;
+  return compareCardIds(a.cardId, b.cardId);
+}
+
+function compareCardIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function selectNewCard(
+  newIds: readonly string[],
   deckSet: ReadonlySet<string>,
-  studyStep: number,
-): CardSchedule[] {
-  const due: CardSchedule[] = [];
-  for (const s of schedules.values()) {
-    if (s.dueStep <= studyStep && deckSet.has(s.cardId)) due.push(s);
+  avoid: ReadonlySet<string>,
+  currentCardId: string | null,
+): string | null {
+  let firstInDeck: string | null = null;
+  let firstNotCurrent: string | null = null;
+  for (const id of newIds) {
+    if (!deckSet.has(id)) continue;
+    firstInDeck ??= id;
+    if (id !== currentCardId) firstNotCurrent ??= id;
+    if (!avoid.has(id)) return id;
   }
-  // 규칙 6: 직전에도 틀린 카드에는 최대 48 step의 우선 보너스를 준다.
-  // dueStep보다 절대 우선하지 않으므로 오래 밀린 일반 카드도 결국 추월해
-  // 특정 오답 카드 묶음만 영원히 순환하는 starvation을 막는다.
-  due.sort((a, b) => {
-    const aPriorityDue = effectiveDueStep(a);
-    const bPriorityDue = effectiveDueStep(b);
-    if (aPriorityDue !== bPriorityDue) return aPriorityDue - bPriorityDue;
-    if (a.dueStep !== b.dueStep) return a.dueStep - b.dueStep;
-    const la = a.lastReviewedStep ?? -1;
-    const lb = b.lastReviewedStep ?? -1;
-    if (la !== lb) return la - lb;
-    return a.cardId < b.cardId ? -1 : 1;
-  });
-  return due;
+  return firstNotCurrent ?? firstInDeck;
 }
 
-function effectiveDueStep(schedule: CardSchedule): number {
-  if (schedule.lastRating !== 'again') return schedule.dueStep;
-  const lapseBoost = Math.min(Math.max(schedule.lapses, 0), 12) * 3;
-  return schedule.dueStep - 12 - lapseBoost;
+function emptyResult(
+  nextDueAt: number | null,
+  nextReviewStep: number | null = null,
+): SelectionResult {
+  return {
+    cardId: null,
+    isDueReview: false,
+    isNew: false,
+    nextDueAt,
+    nextReviewStep,
+  };
 }
 
 /** 전체 둘러보기 모드: due 여부와 무관하게 순서대로 순환 */
@@ -117,7 +272,9 @@ export function selectBrowseCard(
   browseIndex: number,
 ): { cardId: string | null; nextIndex: number } {
   if (orderedIds.length === 0) return { cardId: null, nextIndex: 0 };
-  const idx = ((browseIndex % orderedIds.length) + orderedIds.length) % orderedIds.length;
+  const idx =
+    ((browseIndex % orderedIds.length) + orderedIds.length) %
+    orderedIds.length;
   return { cardId: orderedIds[idx], nextIndex: idx };
 }
 

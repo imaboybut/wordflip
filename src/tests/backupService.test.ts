@@ -10,8 +10,13 @@ import {
   wipeAllData,
 } from '../services/backupService';
 import { importCards } from '../services/importService';
+import {
+  migrateLegacySchedulesToFsrs,
+  rebuildSchedulesFromLogs,
+} from '../services/reviewService';
 import { parseWordsCsv } from '../services/csvService';
-import { makeCard, uniqueDbName } from './helpers';
+import { makeCard, makeSchedule, uniqueDbName } from './helpers';
+import { DEFAULT_SETTINGS } from '../types';
 
 describe('JSON 백업/복원', () => {
   let db: WordFlipDB;
@@ -32,6 +37,7 @@ describe('JSON 백업/복원', () => {
 
   it('백업 → 복원 round-trip으로 모든 학습 상태가 보존된다', async () => {
     const backup = await exportBackup(db);
+    expect(backup.version).toBe(2);
     expect(backup.cards).toHaveLength(2);
     expect(backup.schedules).toHaveLength(2);
     expect(backup.reviewLogs).toHaveLength(2);
@@ -71,6 +77,60 @@ describe('JSON 백업/복원', () => {
         studyStep: -1,
       }),
     ).toThrow();
+    expect(() =>
+      validateBackup({
+        app: 'wordflip', version: 2, cards: [makeCard({ id: 'bad' })],
+        schedules: [makeSchedule({ cardId: 'bad', state: 'review', lastReviewAt: null })],
+        reviewLogs: [], studyStep: 0,
+      }),
+    ).toThrow(/FSRS/);
+    expect(() =>
+      validateBackup({
+        app: 'wordflip', version: 1, cards: [makeCard({ id: 'bad' })],
+        schedules: [], studyStep: 1,
+        reviewLogs: [{
+          id: 'bad-log', cardId: 'bad', rating: 'again', reviewedAt: 'not-a-date',
+        }],
+      }),
+    ).toThrow(/복습 로그/);
+  });
+
+  it('v1 step 백업을 복원하면 실제 reviewedAt을 사용한 FSRS 상태로 변환한다', async () => {
+    const legacy = {
+      app: 'wordflip',
+      version: 1,
+      exportedAt: '2026-01-02T00:00:00.000Z',
+      studyStep: 1,
+      settings: { ...DEFAULT_SETTINGS, desiredRetention: undefined },
+      recentIds: ['c1'],
+      reviewStreak: 0,
+      ratingCounts: { again: 1, hard: 0, good: 0, easy: 0 },
+      cards: [makeCard({ id: 'c1' })],
+      schedules: [{
+        cardId: 'c1', dueStep: 4, intervalSteps: 3, repetitions: 1,
+        lapses: 1, ease: 2.3, lastRating: 'again', lastReviewedStep: 1,
+        firstSeenStep: 1,
+      }],
+      reviewLogs: [{
+        id: 'old-log', cardId: 'c1', stepBefore: 0, stepAfter: 1,
+        rating: 'again', intervalBefore: 0, intervalAfter: 3,
+        schedulerVersion: 2,
+        reviewedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    };
+    const target = createDatabase(uniqueDbName());
+    try {
+      await restoreBackup(target, legacy);
+      const schedule = await target.schedules.get('c1');
+      expect(schedule).toMatchObject({
+        algorithm: 'fsrs-6', lastRating: 'again', state: 'learning',
+      });
+      expect(schedule?.dueAt).toBe(Date.parse('2026-01-01T00:10:00.000Z'));
+      expect((await getMeta(target, META_KEYS.settings, DEFAULT_SETTINGS)).desiredRetention)
+        .toBe(0.9);
+    } finally {
+      await target.delete();
+    }
   });
 
   it('전체 초기화는 모든 테이블을 비운다', async () => {
@@ -138,8 +198,14 @@ describe('CSV import 병합/교체', () => {
     expect(await db.cards.count()).toBe(2);
     const preserved = await db.schedules.get('new-1');
     expect(preserved).toBeDefined();
-    expect(preserved?.intervalSteps).toBe(800);
+    expect(preserved?.scheduledDays).toBeGreaterThan(0);
     expect(await db.reviewLogs.count()).toBe(1);
+    expect((await db.reviewLogs.toArray())[0]).toMatchObject({
+      cardId: 'new-1',
+      scheduleAfter: { cardId: 'new-1' },
+    });
+    await rebuildSchedulesFromLogs(db);
+    expect(await db.schedules.get('new-1')).toBeDefined();
   });
 
   it('교체 + 기록 미보존: 학습 상태가 완전히 초기화된다', async () => {
@@ -157,7 +223,7 @@ describe('CSV import 병합/교체', () => {
 });
 
 describe('스키마 마이그레이션', () => {
-  it('v1 데이터가 v2로 업그레이드되어도 보존된다', async () => {
+  it('v1 데이터가 v3로 업그레이드되어도 카드와 meta가 보존된다', async () => {
     const name = uniqueDbName();
 
     // v1 스키마로 데이터 생성
@@ -175,7 +241,7 @@ describe('스키마 마이그레이션', () => {
     await v1.table('meta').put({ key: 'studyStep', value: 7 });
     v1.close();
 
-    // 앱 스키마(v2)로 열기 → 마이그레이션 실행
+    // 앱 스키마(v3)로 열기 → 마이그레이션 실행
     const db2 = createDatabase(name);
     try {
       const card = await db2.cards.get('m1');
@@ -183,9 +249,77 @@ describe('스키마 마이그레이션', () => {
       expect(card?.word).toBe('padded'); // upgrade에서 trim
       expect(card?.tags).toEqual([]); // 누락 태그 보정
       expect(await getMeta(db2, META_KEYS.studyStep, 0)).toBe(7); // 학습 상태 보존
-      expect(db2.verno).toBe(2);
+      expect(db2.verno).toBe(3);
     } finally {
       await db2.delete();
+    }
+  });
+
+  it('v2 schedule/log가 v3 업그레이드 후 FSRS로 변환된다', async () => {
+    const name = uniqueDbName();
+    const old = new Dexie(name);
+    old.version(2).stores({
+      cards: 'id, orderIndex, category, difficulty, *tags',
+      schedules: 'cardId, dueStep, lastReviewedStep',
+      reviewLogs: 'id, cardId, stepAfter',
+      meta: 'key',
+    });
+    await old.table('cards').add(makeCard({ id: 'm2' }));
+    await old.table('schedules').add({
+      cardId: 'm2', dueStep: 41, intervalSteps: 40, repetitions: 1,
+      lapses: 0, ease: 2.3, lastRating: 'good', lastReviewedStep: 1,
+      firstSeenStep: 1,
+    });
+    await old.table('reviewLogs').add({
+      id: 'm2-log', cardId: 'm2', stepBefore: 0, stepAfter: 1,
+      rating: 'good', intervalBefore: 0, intervalAfter: 40,
+      schedulerVersion: 2, reviewedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await old.table('meta').put({ key: 'studyStep', value: 1 });
+    old.close();
+
+    const upgraded = createDatabase(name);
+    try {
+      await upgraded.open();
+      expect(await getMeta(upgraded, META_KEYS.fsrsMigrationPending, false)).toBe(true);
+      await migrateLegacySchedulesToFsrs(upgraded);
+      expect(await upgraded.schedules.get('m2')).toMatchObject({
+        algorithm: 'fsrs-6', lastRating: 'good', state: 'review',
+      });
+      expect(await upgraded.reviewLogs.count()).toBe(1);
+      expect(await getMeta(upgraded, META_KEYS.studyStep, 0)).toBe(1);
+    } finally {
+      await upgraded.delete();
+    }
+  });
+
+  it('v2 schedule이 손실되고 로그만 남은 경우에도 v3가 복구를 예약한다', async () => {
+    const name = uniqueDbName();
+    const old = new Dexie(name);
+    old.version(2).stores({
+      cards: 'id, orderIndex, category, difficulty, *tags',
+      schedules: 'cardId, dueStep, lastReviewedStep',
+      reviewLogs: 'id, cardId, stepAfter',
+      meta: 'key',
+    });
+    await old.table('cards').add(makeCard({ id: 'logs-only' }));
+    await old.table('reviewLogs').add({
+      id: 'logs-only-1', cardId: 'logs-only', stepBefore: 0, stepAfter: 1,
+      rating: 'good', intervalBefore: 0, intervalAfter: 40,
+      schedulerVersion: 2, reviewedAt: '2026-01-01T00:00:00.000Z',
+    });
+    old.close();
+
+    const upgraded = createDatabase(name);
+    try {
+      await upgraded.open();
+      expect(await getMeta(upgraded, META_KEYS.fsrsMigrationPending, false)).toBe(true);
+      await migrateLegacySchedulesToFsrs(upgraded);
+      expect(await upgraded.schedules.get('logs-only')).toMatchObject({
+        algorithm: 'fsrs-6', lastRating: 'good',
+      });
+    } finally {
+      await upgraded.delete();
     }
   });
 });

@@ -1,320 +1,414 @@
 import { describe, expect, it } from 'vitest';
-import { selectBrowseCard, selectNextCard } from '../queue/cardSelector';
+import {
+  seededShuffle,
+  selectBrowseCard,
+  selectNextCard,
+} from '../queue/cardSelector';
 import type { SelectorContext } from '../queue/queueTypes';
 import type { CardSchedule } from '../types';
-import { makeSchedule } from './helpers';
+
+const MINUTE_MS = 60_000;
+const DAY_MS = 86_400_000;
+const NOW = Date.UTC(2027, 0, 15, 12, 0, 0);
 
 function ctx(overrides: Partial<SelectorContext>): SelectorContext {
   return {
-    studyStep: 0,
+    nowMs: NOW,
+    studyStep: 100,
     schedules: new Map<string, CardSchedule>(),
     deckIds: [],
     newIds: [],
     recentIds: [],
     avoidRecentCount: 5,
-    reviewStreak: 0,
     currentCardId: null,
+    desiredRetention: 0.9,
+    ...overrides,
+  };
+}
+
+function makeSchedule(
+  overrides: Partial<CardSchedule> & { cardId: string },
+): CardSchedule {
+  return {
+    dueAt: NOW - MINUTE_MS,
+    minReviewStep: 0,
+    stability: 10,
+    difficulty: 5,
+    elapsedDays: 10,
+    scheduledDays: 10,
+    learningSteps: 0,
+    reps: 3,
+    lapses: 0,
+    state: 'review',
+    lastReviewAt: NOW - 10 * DAY_MS,
+    lastRating: 'good',
+    algorithm: 'fsrs-6',
     ...overrides,
   };
 }
 
 function scheduleMap(list: CardSchedule[]): Map<string, CardSchedule> {
-  return new Map(list.map((s) => [s.cardId, s]));
+  return new Map(list.map((schedule) => [schedule.cardId, schedule]));
 }
 
-describe('큐 선택 규칙', () => {
-  it('due 카드를 신규 카드보다 우선한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'due1', dueStep: 5, lastReviewedStep: 1 }),
-    ]);
+describe('FSRS 실시간 큐 선택', () => {
+  it('dueAt과 minReviewStep을 모두 지난 카드만 신규 카드보다 우선한다', () => {
     const result = selectNextCard(
       ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['due1', 'new1', 'new2'],
-        newIds: ['new1', 'new2'],
+        schedules: scheduleMap([makeSchedule({ cardId: 'due' })]),
+        deckIds: ['due', 'new'],
+        newIds: ['new'],
       }),
     );
-    expect(result.cardId).toBe('due1');
+
+    expect(result).toEqual({
+      cardId: 'due',
+      isDueReview: true,
+      isNew: false,
+      nextDueAt: null,
+      nextReviewStep: null,
+    });
+  });
+
+  it('FSRS 시간이 오지 않은 카드는 절대 일찍 다시 꺼내지 않는다', () => {
+    const dueAt = NOW + 10 * MINUTE_MS;
+    const result = selectNextCard(
+      ctx({
+        schedules: scheduleMap([
+          makeSchedule({ cardId: 'again', dueAt, state: 'relearning' }),
+        ]),
+        deckIds: ['again'],
+      }),
+    );
+
+    expect(result.cardId).toBeNull();
+    expect(result.isDueReview).toBe(false);
+    expect(result.nextDueAt).toBe(dueAt);
+    expect(result.nextReviewStep).toBeNull();
+  });
+
+  it('미래 복습 카드 대신 신규 카드를 계속 보여준다', () => {
+    const result = selectNextCard(
+      ctx({
+        schedules: scheduleMap([
+          makeSchedule({
+            cardId: 'again',
+            dueAt: NOW + 10 * MINUTE_MS,
+            state: 'relearning',
+          }),
+        ]),
+        deckIds: ['again', 'new'],
+        newIds: ['new'],
+      }),
+    );
+
+    expect(result.cardId).toBe('new');
+    expect(result.isNew).toBe(true);
+    expect(result.nextDueAt).toBeNull();
+  });
+
+  it('dueAt이 지나도 minReviewStep 전이면 대안 신규 카드를 고른다', () => {
+    const result = selectNextCard(
+      ctx({
+        studyStep: 100,
+        schedules: scheduleMap([
+          makeSchedule({ cardId: 'gated', minReviewStep: 105 }),
+        ]),
+        deckIds: ['gated', 'new'],
+        newIds: ['new'],
+      }),
+    );
+
+    expect(result.cardId).toBe('new');
+    expect(result.isNew).toBe(true);
+  });
+
+  it('dueAt과 minReviewStep 조건을 모두 만족하면 복습한다', () => {
+    const result = selectNextCard(
+      ctx({
+        studyStep: 105,
+        schedules: scheduleMap([
+          makeSchedule({ cardId: 'ready', minReviewStep: 105 }),
+        ]),
+        deckIds: ['ready', 'new'],
+        newIds: ['new'],
+      }),
+    );
+
+    expect(result.cardId).toBe('ready');
     expect(result.isDueReview).toBe(true);
   });
 
-  it('같은 난이도의 due 카드는 dueStep 작은 순 → lastReviewedStep 작은 순', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'a', dueStep: 8, lastReviewedStep: 3 }),
-      makeSchedule({ cardId: 'b', dueStep: 5, lastReviewedStep: 4 }),
-      makeSchedule({ cardId: 'c', dueStep: 5, lastReviewedStep: 2 }),
-    ]);
-    const result = selectNextCard(
-      ctx({ studyStep: 10, schedules, deckIds: ['a', 'b', 'c'] }),
-    );
-    expect(result.cardId).toBe('c');
-  });
-
-  it('직전에도 Again인 due 카드를 더 오래 밀린 일반 카드보다 우선한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({
-        cardId: 'known',
-        dueStep: 1,
-        lapses: 0,
-        lastRating: 'good',
-      }),
-      makeSchedule({
-        cardId: 'missed',
-        dueStep: 9,
-        lapses: 1,
-        lastRating: 'again',
-      }),
-    ]);
-    const result = selectNextCard(
-      ctx({ studyStep: 10, schedules, deckIds: ['known', 'missed'] }),
-    );
-    expect(result.cardId).toBe('missed');
-  });
-
-  it('직전 Again 카드끼리는 누적 오답이 많은 카드를 우선한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'few', dueStep: 1, lapses: 1, lastRating: 'again' }),
-      makeSchedule({ cardId: 'many', dueStep: 9, lapses: 4, lastRating: 'again' }),
-    ]);
-    const result = selectNextCard(
-      ctx({ studyStep: 10, schedules, deckIds: ['few', 'many'] }),
-    );
-    expect(result.cardId).toBe('many');
-  });
-
-  it('오답 우선순위가 높아도 최근 카드 회피는 유지한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'regular', dueStep: 1, lastRating: 'good' }),
-      makeSchedule({
-        cardId: 'missed',
-        dueStep: 9,
-        lapses: 5,
-        lastRating: 'again',
-      }),
-    ]);
+  it('한 장짜리 덱은 시간 바닥이 지난 뒤 step gate를 최후 수단으로 완화한다', () => {
     const result = selectNextCard(
       ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['regular', 'missed'],
-        recentIds: ['missed'],
-      }),
-    );
-    expect(result.cardId).toBe('regular');
-  });
-
-  it('아주 오래 밀린 일반 due 카드는 반복 오답 카드를 결국 추월한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({
-        cardId: 'starved',
-        dueStep: 1,
-        lastRating: 'good',
-      }),
-      makeSchedule({
-        cardId: 'missed',
-        dueStep: 90,
-        lapses: 100,
-        lastRating: 'again',
-      }),
-    ]);
-    const result = selectNextCard(
-      ctx({ studyStep: 100, schedules, deckIds: ['starved', 'missed'] }),
-    );
-    expect(result.cardId).toBe('starved');
-  });
-
-  it('복습 카드 3연속 후에는 신규 카드 1장을 보여준다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'due1', dueStep: 1 }),
-    ]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['due1', 'new1'],
-        newIds: ['new1'],
-        reviewStreak: 3,
-      }),
-    );
-    expect(result.cardId).toBe('new1');
-    expect(result.isNew).toBe(true);
-    expect(result.isDueReview).toBe(false);
-  });
-
-  it('streak이 3 미만이면 계속 due 우선', () => {
-    const schedules = scheduleMap([makeSchedule({ cardId: 'due1', dueStep: 1 })]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['due1', 'new1'],
-        newIds: ['new1'],
-        reviewStreak: 2,
-        recentIds: [],
-      }),
-    );
-    expect(result.cardId).toBe('due1');
-  });
-
-  it('최근 5장에 나온 카드는 다시 선택하지 않는다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'r1', dueStep: 1, lastReviewedStep: 1 }),
-      makeSchedule({ cardId: 'r2', dueStep: 2, lastReviewedStep: 2 }),
-    ]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['r1', 'r2'],
-        recentIds: ['x1', 'x2', 'x3', 'x4', 'r1'],
-      }),
-    );
-    expect(result.cardId).toBe('r2');
-  });
-
-  it('대안이 없을 때만 최근 카드를 허용한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'r1', dueStep: 1 }),
-    ]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['r1'],
-        recentIds: ['r1'],
-      }),
-    );
-    expect(result.cardId).toBe('r1');
-  });
-
-  it('신규 카드가 모두 소진되면 가장 오래 보지 않은 카드를 고른다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'a', dueStep: 100, lastReviewedStep: 9 }),
-      makeSchedule({ cardId: 'b', dueStep: 200, lastReviewedStep: 3 }),
-      makeSchedule({ cardId: 'c', dueStep: 300, lastReviewedStep: 6 }),
-    ]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
-        deckIds: ['a', 'b', 'c'],
-        newIds: [],
-        avoidRecentCount: 0,
-      }),
-    );
-    expect(result.cardId).toBe('b');
-  });
-
-  it('신규 카드를 순서대로 모두 탐색할 수 있다', () => {
-    const seen = new Set<string>();
-    const deckIds = Array.from({ length: 10 }, (_, i) => `n${i}`);
-    let newIds = deckIds.slice();
-    let current: string | null = null;
-    for (let i = 0; i < 10; i++) {
-      const result = selectNextCard(
-        ctx({ deckIds, newIds, currentCardId: current }),
-      );
-      expect(result.cardId).not.toBeNull();
-      expect(result.isNew).toBe(true);
-      seen.add(result.cardId as string);
-      current = result.cardId;
-      newIds = newIds.filter((id) => id !== result.cardId);
-    }
-    expect(seen.size).toBe(10);
-  });
-
-  it('카드가 한 장뿐이면 무한 루프 없이 그 카드를 반환한다', () => {
-    const schedules = scheduleMap([
-      makeSchedule({ cardId: 'only', dueStep: 1, lastReviewedStep: 1 }),
-    ]);
-    const result = selectNextCard(
-      ctx({
-        studyStep: 10,
-        schedules,
+        studyStep: 100,
+        schedules: scheduleMap([
+          makeSchedule({ cardId: 'only', minReviewStep: 110 }),
+        ]),
         deckIds: ['only'],
-        recentIds: ['only'],
         currentCardId: 'only',
       }),
     );
+
     expect(result.cardId).toBe('only');
+    expect(result.isDueReview).toBe(true);
+    expect(result.nextReviewStep).toBeNull();
   });
 
-  it('같은 카드가 즉시 연속으로 나오지 않는다 (대안이 있을 때)', () => {
+  it('학습/재학습 due 카드를 일반 review보다 먼저 고른다', () => {
     const schedules = scheduleMap([
-      makeSchedule({ cardId: 'a', dueStep: 1, lastReviewedStep: 1 }),
-      makeSchedule({ cardId: 'b', dueStep: 2, lastReviewedStep: 2 }),
+      makeSchedule({
+        cardId: 'review-low-r',
+        stability: 1,
+        lastReviewAt: NOW - 30 * DAY_MS,
+      }),
+      makeSchedule({
+        cardId: 'learning',
+        state: 'learning',
+        dueAt: NOW - MINUTE_MS,
+      }),
+      makeSchedule({
+        cardId: 'relearning',
+        state: 'relearning',
+        dueAt: NOW - 2 * MINUTE_MS,
+      }),
     ]);
+
     const result = selectNextCard(
       ctx({
-        studyStep: 10,
         schedules,
-        deckIds: ['a', 'b'],
-        currentCardId: 'a',
-        avoidRecentCount: 0,
+        deckIds: ['review-low-r', 'learning', 'relearning'],
       }),
     );
-    expect(result.cardId).toBe('b');
+
+    expect(result.cardId).toBe('relearning');
   });
 
-  it('deck에 속하지 않은 카드(별표/검색 밖)는 due여도 나오지 않는다', () => {
+  it('일반 review는 회상 가능성이 낮은 카드부터 고른다', () => {
     const schedules = scheduleMap([
-      makeSchedule({ cardId: 'out', dueStep: 1 }),
-      makeSchedule({ cardId: 'in', dueStep: 5 }),
+      makeSchedule({
+        cardId: 'strong',
+        stability: 30,
+        lastReviewAt: NOW - 10 * DAY_MS,
+      }),
+      makeSchedule({
+        cardId: 'weak',
+        stability: 2,
+        lastReviewAt: NOW - 10 * DAY_MS,
+      }),
     ]);
+
     const result = selectNextCard(
-      ctx({ studyStep: 10, schedules, deckIds: ['in'] }),
+      ctx({ schedules, deckIds: ['strong', 'weak'] }),
     );
-    expect(result.cardId).toBe('in');
+
+    expect(result.cardId).toBe('weak');
   });
 
-  it('빈 덱이면 null을 반환한다 (별표 없음 등)', () => {
-    const result = selectNextCard(ctx({ deckIds: [] }));
-    expect(result.cardId).toBeNull();
+  it('회상 가능성이 같으면 dueAt → lastReviewAt → cardId 순으로 결정한다', () => {
+    const base = {
+      stability: 10,
+      lastReviewAt: NOW - 10 * DAY_MS,
+    };
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'z', dueAt: NOW - MINUTE_MS, ...base }),
+      makeSchedule({ cardId: 'b', dueAt: NOW - 2 * MINUTE_MS, ...base }),
+      makeSchedule({ cardId: 'a', dueAt: NOW - 2 * MINUTE_MS, ...base }),
+    ]);
+
+    expect(
+      selectNextCard(ctx({ schedules, deckIds: ['z', 'b', 'a'] })).cardId,
+    ).toBe('a');
   });
 
-  it('5,000개 카드에서도 선택이 빠르다', () => {
-    const n = 5000;
-    const deckIds = Array.from({ length: n }, (_, i) => `c${i}`);
+  it('Again 및 누적 lapse에 별도 수동 우선 보너스를 주지 않는다', () => {
+    const sameMemory = {
+      stability: 10,
+      lastReviewAt: NOW - 10 * DAY_MS,
+    };
+    const schedules = scheduleMap([
+      makeSchedule({
+        cardId: 'ordinary',
+        dueAt: NOW - 2 * MINUTE_MS,
+        lapses: 0,
+        lastRating: 'good',
+        ...sameMemory,
+      }),
+      makeSchedule({
+        cardId: 'many-lapses',
+        dueAt: NOW - MINUTE_MS,
+        lapses: 100,
+        lastRating: 'again',
+        ...sameMemory,
+      }),
+    ]);
+
+    const result = selectNextCard(
+      ctx({ schedules, deckIds: ['ordinary', 'many-lapses'] }),
+    );
+
+    expect(result.cardId).toBe('ordinary');
+  });
+
+  it('최근 카드와 현재 카드는 due 대안이 있으면 피한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'recent', stability: 1 }),
+      makeSchedule({ cardId: 'current', stability: 2 }),
+      makeSchedule({ cardId: 'other', stability: 20 }),
+    ]);
+
+    const result = selectNextCard(
+      ctx({
+        schedules,
+        deckIds: ['recent', 'current', 'other'],
+        recentIds: ['x', 'recent'],
+        currentCardId: 'current',
+      }),
+    );
+
+    expect(result.cardId).toBe('other');
+  });
+
+  it('모든 due 카드가 최근 목록에 있으면 가장 우선인 due 카드를 허용한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'weak', stability: 1 }),
+      makeSchedule({ cardId: 'strong', stability: 20 }),
+    ]);
+
+    const result = selectNextCard(
+      ctx({
+        schedules,
+        deckIds: ['weak', 'strong'],
+        recentIds: ['weak', 'strong'],
+      }),
+    );
+
+    expect(result.cardId).toBe('weak');
+  });
+
+  it('신규 카드도 최근/현재 항목을 대안이 있을 때 피하고 덱 순서를 보존한다', () => {
+    const result = selectNextCard(
+      ctx({
+        deckIds: ['n1', 'n2', 'n3'],
+        newIds: ['outside', 'n1', 'n2', 'n3'],
+        recentIds: ['n1'],
+        currentCardId: 'n2',
+      }),
+    );
+
+    expect(result.cardId).toBe('n3');
+    expect(result.isNew).toBe(true);
+  });
+
+  it('모든 신규 카드가 회피 대상이면 현재 카드가 아닌 신규 카드를 허용한다', () => {
+    const result = selectNextCard(
+      ctx({
+        deckIds: ['n1', 'n2'],
+        newIds: ['n1', 'n2'],
+        recentIds: ['n1'],
+        currentCardId: 'n2',
+      }),
+    );
+
+    expect(result.cardId).toBe('n1');
+  });
+
+  it('due도 신규도 없으면 미래 카드를 강제하지 않고 가장 이른 dueAt을 알린다', () => {
+    const earliest = NOW + 30 * MINUTE_MS;
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'later', dueAt: NOW + DAY_MS }),
+      makeSchedule({ cardId: 'earliest', dueAt: earliest }),
+      makeSchedule({ cardId: 'outside', dueAt: NOW + MINUTE_MS }),
+    ]);
+
+    const result = selectNextCard(
+      ctx({ schedules, deckIds: ['later', 'earliest'] }),
+    );
+
+    expect(result).toEqual({
+      cardId: null,
+      isDueReview: false,
+      isNew: false,
+      nextDueAt: earliest,
+      nextReviewStep: null,
+    });
+  });
+
+  it('현재 모드의 deckIds 밖 카드는 due여도 선택하지 않는다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'search-out', stability: 1 }),
+      makeSchedule({ cardId: 'search-in', stability: 20 }),
+    ]);
+
+    const result = selectNextCard(
+      ctx({ schedules, deckIds: ['search-in'] }),
+    );
+
+    expect(result.cardId).toBe('search-in');
+  });
+
+  it('빈 덱이면 대기 정보도 없는 null 결과를 반환한다', () => {
+    expect(selectNextCard(ctx({ deckIds: [] }))).toEqual({
+      cardId: null,
+      isDueReview: false,
+      isNew: false,
+      nextDueAt: null,
+      nextReviewStep: null,
+    });
+  });
+
+  it('5,000장에서도 100회 선택을 1초 안에 마친다', () => {
+    const count = 5_000;
+    const deckIds = Array.from({ length: count }, (_, index) => `c${index}`);
     const schedules = scheduleMap(
-      deckIds.slice(0, 4000).map((id, i) =>
+      deckIds.slice(0, 4_000).map((cardId, index) =>
         makeSchedule({
-          cardId: id,
-          dueStep: (i * 7) % 3000,
-          lastReviewedStep: i,
+          cardId,
+          dueAt: NOW - ((index % 120) + 1) * MINUTE_MS,
+          stability: (index % 30) + 1,
+          lastReviewAt: NOW - ((index % 60) + 1) * DAY_MS,
         }),
       ),
     );
-    const newIds = deckIds.slice(4000);
-    const start = performance.now();
-    for (let i = 0; i < 100; i++) {
+    const newIds = deckIds.slice(4_000);
+    const startedAt = performance.now();
+
+    for (let index = 0; index < 100; index += 1) {
       selectNextCard(
         ctx({
-          studyStep: 1500 + i,
           schedules,
           deckIds,
           newIds,
-          recentIds: deckIds.slice(i, i + 5),
+          recentIds: deckIds.slice(index, index + 5),
         }),
       );
     }
-    const elapsed = performance.now() - start;
-    // 100회 선택에 1초 미만 (실사용에선 1회당 수 ms 수준)
-    expect(elapsed).toBeLessThan(1000);
+
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
   });
 });
 
-describe('전체 둘러보기', () => {
-  it('due 여부와 무관하게 순서대로 순환한다', () => {
+describe('전체 둘러보기와 신규 순서', () => {
+  it('browse는 due 여부와 무관하게 양방향 index를 순환한다', () => {
     const ids = ['a', 'b', 'c'];
-    expect(selectBrowseCard(ids, 0).cardId).toBe('a');
-    expect(selectBrowseCard(ids, 2).cardId).toBe('c');
-    // 끝까지 도달하면 처음부터 순환
-    expect(selectBrowseCard(ids, 3).cardId).toBe('a');
-    expect(selectBrowseCard(ids, 7).cardId).toBe('b');
+    expect(selectBrowseCard(ids, 0)).toEqual({ cardId: 'a', nextIndex: 0 });
+    expect(selectBrowseCard(ids, 3)).toEqual({ cardId: 'a', nextIndex: 0 });
+    expect(selectBrowseCard(ids, -1)).toEqual({ cardId: 'c', nextIndex: 2 });
   });
 
-  it('빈 목록이면 null', () => {
-    expect(selectBrowseCard([], 0).cardId).toBeNull();
+  it('browse 빈 목록은 null이다', () => {
+    expect(selectBrowseCard([], 10)).toEqual({ cardId: null, nextIndex: 0 });
+  });
+
+  it('seeded shuffle은 같은 seed에서 결정적이며 원본을 바꾸지 않는다', () => {
+    const original = ['a', 'b', 'c', 'd', 'e'];
+    const first = seededShuffle(original, 42);
+    const second = seededShuffle(original, 42);
+
+    expect(first).toEqual(second);
+    expect(first).not.toEqual(original);
+    expect([...first].sort()).toEqual([...original].sort());
+    expect(original).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 });

@@ -281,7 +281,8 @@ export function DataPage() {
           <h2 className="panel__title">진단 정보</h2>
           <p className="panel__note">
             카드 {cards.size.toLocaleString()}개 · 학습된 카드{' '}
-            {schedules.size.toLocaleString()}개 · studyStep {studyStep.toLocaleString()}
+            {schedules.size.toLocaleString()}개 · 누적 평가 {studyStep.toLocaleString()}회 ·
+            FSRS-6
           </p>
         </section>
       )}

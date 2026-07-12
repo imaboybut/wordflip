@@ -72,6 +72,7 @@ export async function importCards(
 
       // replace 모드
       const schedules = await dbi.schedules.toArray();
+      const reviewLogs = await dbi.reviewLogs.toArray();
       const scheduleByCardId = new Map(schedules.map((s) => [s.cardId, s]));
 
       await dbi.cards.clear();
@@ -83,6 +84,7 @@ export async function importCards(
 
       if (options.preserveProgress) {
         const preserved = [];
+        const idMap = new Map<string, string>();
         for (const card of newCards) {
           // 같은 id 우선, 없으면 같은 단어였던 기존 카드의 기록을 승계
           const old =
@@ -93,9 +95,39 @@ export async function importCards(
             })();
           if (old) {
             preserved.push({ ...old, cardId: card.id });
+            idMap.set(old.cardId, card.id);
           }
         }
         await dbi.schedules.bulkPut(preserved);
+        // 단어가 같은데 id만 바뀐 경우 로그와 snapshot의 cardId도 함께 옮긴다.
+        // 그렇지 않으면 이후 "로그로 재계산"에서 보존한 진도가 사라진다.
+        const remappedLogs = reviewLogs
+          .filter((log) => idMap.has(log.cardId))
+          .map((log) => {
+            const cardId = idMap.get(log.cardId) as string;
+            return {
+              ...log,
+              cardId,
+              scheduleAfter: log.scheduleAfter
+                ? { ...log.scheduleAfter, cardId }
+                : undefined,
+            };
+          });
+        await dbi.reviewLogs.clear();
+        if (remappedLogs.length > 0) await dbi.reviewLogs.bulkPut(remappedLogs);
+        const counts = { again: 0, hard: 0, good: 0, easy: 0 };
+        for (const log of remappedLogs) counts[log.rating] += 1;
+        const previousRecent = await getMeta<string[]>(dbi, META_KEYS.recentIds, []);
+        const recentIds = previousRecent
+          .map((id) => idMap.get(id))
+          .filter((id): id is string => id !== undefined);
+        await Promise.all([
+          setMeta(dbi, META_KEYS.recentIds, recentIds),
+          setMeta(dbi, META_KEYS.reviewStreak, 0),
+          setMeta(dbi, META_KEYS.ratingCounts, counts),
+          setMeta(dbi, META_KEYS.lastUndo, null),
+          setMeta(dbi, META_KEYS.studySession, null),
+        ]);
         progressPreserved = preserved.length;
       } else {
         await dbi.reviewLogs.clear();

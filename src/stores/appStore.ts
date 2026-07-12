@@ -31,8 +31,12 @@ export interface AppState {
   currentCardId: string | null;
   currentWasDue: boolean;
   flipped: boolean;
-  /** 모름 평가를 저장한 뒤, 현재 뒷면에서 다음 탭을 기다리는 상태 */
+  /** v2 세션 호환용. FSRS 흐름에서는 항상 false다. */
   awaitingAdvance: boolean;
+  /** 현재 모드에서 가장 이른 미래 복습 시각. */
+  nextDueAt: number | null;
+  /** 시간은 됐지만 무작위 최소 카드 간격이 남은 누적 평가 횟수. */
+  nextReviewStep: number | null;
   isRating: boolean;
   canUndo: boolean;
 
@@ -57,6 +61,8 @@ export const initialAppState: AppState = {
   currentWasDue: false,
   flipped: false,
   awaitingAdvance: false,
+  nextDueAt: null,
+  nextReviewStep: null,
   isRating: false,
   canUndo: false,
   seedReport: null,

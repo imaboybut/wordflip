@@ -102,6 +102,34 @@ export function SettingsPage() {
             aria-label="최근 카드 반복 방지 개수"
           />
         </label>
+        <label className="field">
+          <span className="field__label">
+            목표 기억 유지율: {Math.round(settings.desiredRetention * 100)}%
+          </span>
+          <input
+            type="range"
+            min={0.8}
+            max={0.97}
+            step={0.01}
+            value={settings.desiredRetention}
+            onChange={(e) =>
+              void updateSettings({ desiredRetention: Number(e.target.value) })
+            }
+            aria-label="FSRS 목표 기억 유지율"
+          />
+        </label>
+        <p className="panel__note">
+          Anki 기본값은 90%입니다. 높일수록 더 자주 복습하며, 변경값은 다음
+          평가부터 적용됩니다.
+        </p>
+        <label className="switch-row">
+          <span>답 공개 후 4방향 스와이프 평가</span>
+          <input
+            type="checkbox"
+            checked={settings.swipeEnabled}
+            onChange={(e) => void updateSettings({ swipeEnabled: e.target.checked })}
+          />
+        </label>
       </section>
 
       <section className="panel">
@@ -186,7 +214,8 @@ export function SettingsPage() {
           />
         </label>
         <p className="panel__note">
-          학습 화면에 dueStep, interval, ease 등 내부 값을 표시합니다.
+          학습 화면에 FSRS 난이도(D), 안정성(S), 회상 가능성(R), 예정 시각과
+          남은 카드 간격을 표시합니다.
         </p>
       </section>
     </div>

@@ -21,8 +21,8 @@ export function StudyCard({ card, flipped, animationsEnabled, onFlip }: Props) {
       tabIndex={0}
       aria-label={
         flipped
-          ? '카드를 눌러 다음 단어 보기'
-          : '카드를 눌러 뜻을 보고 모르는 단어로 표시'
+          ? '뜻을 확인하고 아래에서 기억 정도 선택'
+          : '카드를 눌러 뜻 확인'
       }
       data-testid="study-card"
       onClick={onFlip}
@@ -65,7 +65,7 @@ export function StudyCard({ card, flipped, animationsEnabled, onFlip }: Props) {
             <TtsButton text={card.word} label="영어 발음 재생" />
           </div>
           <p className="study-card__hint">
-            모르면 카드를 눌러 뜻 보기
+            카드를 눌러 뜻 보기
           </p>
         </div>
 

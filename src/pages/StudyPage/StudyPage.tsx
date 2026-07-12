@@ -2,8 +2,9 @@ import { useEffect, useMemo } from 'react';
 import type { Rating } from '../../types';
 import { useAppState } from '../../stores/appStore';
 import {
-  advanceAfterReveal,
+  advanceToNextCard,
   markCurrentCardKnown,
+  rateCurrentCard,
   revealCurrentCardAsUnknown,
   setStudyMode,
   skipCard,
@@ -11,7 +12,8 @@ import {
 } from '../../stores/appActions';
 import { StudyCard } from '../../components/StudyCard/StudyCard';
 import { SwipeCard } from '../../components/SwipeCard/SwipeCard';
-import { rateCard } from '../../scheduler/stepScheduler';
+import { RatingButtons } from '../../components/RatingButtons/RatingButtons';
+import { createFsrsAdapter } from '../../scheduler/fsrsAdapter';
 
 export function StudyPage() {
   const state = useAppState();
@@ -23,77 +25,92 @@ export function StudyPage() {
     mode,
     currentCardId,
     flipped,
-    awaitingAdvance,
     isRating,
     canUndo,
+    nextDueAt,
+    nextReviewStep,
   } = state;
-
   const card = currentCardId !== null ? cards.get(currentCardId) : undefined;
 
-  // 데스크톱 접근성: 키보드 조작
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement) {
         const tag = e.target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (e.target.closest('button')) return;
       }
-      if (e.key === ' ' || e.key === 'Enter') {
-        // 카드에 포커스가 없어도 키보드로 같은 한-탭 흐름을 사용할 수 있다.
-        if (e.target instanceof HTMLElement && e.target.closest('button')) return;
+      if ((e.key === ' ' || e.key === 'Enter') && !flipped) {
         e.preventDefault();
-        if (awaitingAdvance) advanceAfterReveal();
-        else if (!flipped) void revealCurrentCardAsUnknown();
+        void revealCurrentCardAsUnknown();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [awaitingAdvance, flipped]);
+  }, [flipped]);
+
+  // due 시각이 되는 순간과 PWA가 다시 활성화되는 순간 큐를 다시 확인한다.
+  useEffect(() => {
+    if (card || mode.type === 'browse') return;
+    const refresh = () => {
+      if (document.visibilityState !== 'hidden') advanceToNextCard();
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    let timer: number | undefined;
+    if (nextDueAt !== null) {
+      const armTimer = () => {
+        const remaining = nextDueAt - Date.now();
+        if (remaining <= 0) {
+          refresh();
+          return;
+        }
+        // setTimeout 최대 범위(약 24.9일)보다 먼 일정은 같은 effect 안에서
+        // 여러 번 이어 예약한다.
+        timer = window.setTimeout(
+          armTimer,
+          Math.min(Math.max(remaining + 50, 50), 2_147_483_647),
+        );
+      };
+      armTimer();
+    }
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [card, mode.type, nextDueAt]);
 
   const stats = useMemo(() => {
     let starredCount = 0;
     for (const c of cards.values()) if (c.starred) starredCount += 1;
-    return {
-      total: cards.size,
-      seen: schedules.size,
-      starred: starredCount,
-      steps: studyStep,
-    };
-  }, [cards, schedules, studyStep]);
+    return { total: cards.size, seen: schedules.size, starred: starredCount };
+  }, [cards, schedules]);
 
   const previews = useMemo(() => {
     if (!settings.showDiagnostics || !card) return null;
-    const prev = schedules.get(card.id) ?? null;
-    const result: Record<Rating, number> = { again: 0, hard: 0, good: 0, easy: 0 };
-    for (const r of ['again', 'hard', 'good', 'easy'] as const) {
-      result[r] = rateCard(prev, card.id, r, studyStep + 1).intervalSteps;
-    }
-    return result;
-  }, [settings.showDiagnostics, card, schedules, studyStep]);
-
-  const emptyMessage = getEmptyMessage();
+    const now = Date.now();
+    const adapter = createFsrsAdapter(settings.desiredRetention, { enableFuzz: false });
+    const preview = adapter.preview(schedules.get(card.id) ?? null, now);
+    return Object.fromEntries(
+      (['again', 'hard', 'good', 'easy'] as const).map((rating) => [
+        rating,
+        formatInterval(preview[rating].card.dueAt - now),
+      ]),
+    ) as Record<Rating, string>;
+  }, [settings.showDiagnostics, settings.desiredRetention, card, schedules]);
 
   const handleCardTap = () => {
-    if (isRating) return;
-    if (awaitingAdvance) {
-      advanceAfterReveal();
-    } else if (!flipped) {
-      void revealCurrentCardAsUnknown();
-    }
+    if (!isRating && !flipped) void revealCurrentCardAsUnknown();
   };
 
-  function getEmptyMessage(): string | null {
-    if (card) return null;
-    if (cards.size === 0) {
-      return '단어가 없습니다. 데이터 탭에서 CSV를 가져오거나 샘플 데이터를 불러와 주세요.';
-    }
-    if (mode.type === 'starred') {
-      return '별표 카드가 없습니다. 카드의 ☆ 버튼을 눌러 별표를 표시해 보세요.';
-    }
-    if (mode.type === 'search') {
-      return `"${mode.query ?? ''}" 검색 결과가 없습니다.`;
-    }
-    return '표시할 카드가 없습니다.';
-  }
+  const emptyMessage = getEmptyMessage({
+    hasCard: card !== undefined,
+    cardsSize: cards.size,
+    mode,
+    nextDueAt,
+    nextReviewStep,
+    studyStep,
+  });
 
   return (
     <div className="study-page">
@@ -143,37 +160,31 @@ export function StudyPage() {
           </div>
         )}
         <p className="study-page__stats">
-          전체 {stats.total.toLocaleString()} · 본 단어{' '}
-          {stats.seen.toLocaleString()} · 별표 {stats.starred.toLocaleString()} ·
-          총 넘김 {stats.steps.toLocaleString()}
+          전체 {stats.total.toLocaleString()} · 본 단어 {stats.seen.toLocaleString()} ·
+          별표 {stats.starred.toLocaleString()} · 총 평가 {studyStep.toLocaleString()}
         </p>
       </header>
 
       <main className="study-page__card-area">
         {card ? (
           <SwipeCard
-            canRate={false}
-            swipeEnabled={false}
+            canRate={flipped}
+            swipeEnabled={settings.swipeEnabled}
             animationsEnabled={settings.animationsEnabled}
-            onRate={() => {}}
+            onRate={(rating) => void rateCurrentCard(rating)}
             onTap={handleCardTap}
           >
             <StudyCard
               card={card}
               flipped={flipped}
               animationsEnabled={settings.animationsEnabled}
-              onFlip={() => {
-                /* 탭 처리는 SwipeCard의 onTap에서 담당. 클릭(키보드)만 여기로 온다 */
-                handleCardTap();
-              }}
+              onFlip={handleCardTap}
             />
           </SwipeCard>
         ) : (
           <div className="study-page__empty">{emptyMessage}</div>
         )}
-        {settings.showDiagnostics && card && (
-          <DiagnosticsPanel cardId={card.id} />
-        )}
+        {settings.showDiagnostics && card && <DiagnosticsPanel cardId={card.id} />}
       </main>
 
       <footer className="study-page__footer">
@@ -181,7 +192,7 @@ export function StudyPage() {
           <div
             className="rating-buttons rating-buttons--single"
             role="group"
-            aria-label="카드 평가"
+            aria-label="빠른 카드 평가"
           >
             <button
               type="button"
@@ -193,18 +204,18 @@ export function StudyPage() {
               <span className="rating-button__en">Good</span>
               <span className="rating-button__ko">알아요 · 다음 단어</span>
               {previews && (
-                <span className="rating-button__preview">+{previews.good}</span>
+                <span className="rating-button__preview">{previews.good}</span>
               )}
             </button>
           </div>
+        ) : flipped && card ? (
+          <RatingButtons
+            disabled={isRating}
+            onRate={(rating) => void rateCurrentCard(rating)}
+            previews={previews}
+          />
         ) : (
-          <p className="study-page__flip-hint" aria-hidden="true">
-            {card
-              ? awaitingAdvance
-                ? '뜻을 확인한 뒤 카드를 한 번 더 누르면 다음 단어로 넘어갑니다'
-                : '카드를 눌러 뜻을 확인하세요'
-              : ''}
-          </p>
+          <p className="study-page__flip-hint" aria-hidden="true" />
         )}
         <div className="study-page__footer-row">
           <button
@@ -244,16 +255,65 @@ export function StudyPage() {
 }
 
 function DiagnosticsPanel({ cardId }: { cardId: string }) {
-  const { schedules, studyStep, reviewStreak } = useAppState();
-  const s = schedules.get(cardId);
+  const { schedules, settings, studyStep } = useAppState();
+  const schedule = schedules.get(cardId);
+  if (!schedule) return <div className="diagnostics"><code>FSRS 신규 카드</code></div>;
+  const retrievability = createFsrsAdapter(settings.desiredRetention, {
+    enableFuzz: false,
+  }).retrievability(schedule, Date.now());
   return (
     <div className="diagnostics">
       <code>
-        step={studyStep} streak={reviewStreak}
-        {s
-          ? ` due=${s.dueStep} int=${s.intervalSteps} ease=${s.ease.toFixed(2)} rep=${s.repetitions} lapse=${s.lapses}`
-          : ' (신규 카드)'}
+        FSRS-6 · D={schedule.difficulty.toFixed(2)} · S={schedule.stability.toFixed(2)}일
+        {' · '}R={(retrievability * 100).toFixed(1)}% · due={formatDate(schedule.dueAt)}
+        {' · '}gap={Math.max(0, schedule.minReviewStep - studyStep)}장
       </code>
     </div>
   );
+}
+
+function getEmptyMessage(input: {
+  hasCard: boolean;
+  cardsSize: number;
+  mode: ReturnType<typeof useAppState>['mode'];
+  nextDueAt: number | null;
+  nextReviewStep: number | null;
+  studyStep: number;
+}): string | null {
+  if (input.hasCard) return null;
+  if (input.cardsSize === 0) {
+    return '단어가 없습니다. 데이터 탭에서 CSV를 가져와 주세요.';
+  }
+  if (input.mode.type === 'starred' && input.nextDueAt === null && input.nextReviewStep === null) {
+    return '별표 카드가 없거나 지금 복습할 별표 카드가 없습니다.';
+  }
+  if (input.mode.type === 'search' && input.nextDueAt === null && input.nextReviewStep === null) {
+    return `“${input.mode.query ?? ''}” 검색 결과가 없거나 지금 복습할 카드가 없습니다.`;
+  }
+  if (input.nextReviewStep !== null && input.nextReviewStep > input.studyStep) {
+    return `이 카드가 너무 빨리 반복되지 않도록 다른 카드를 ${input.nextReviewStep - input.studyStep}장 더 학습한 뒤 다시 보여드립니다.`;
+  }
+  if (input.nextDueAt !== null) {
+    return `지금 복습할 카드는 없습니다. 다음 복습: ${formatDate(input.nextDueAt)}`;
+  }
+  return '현재 모드의 학습을 마쳤습니다.';
+}
+
+function formatInterval(milliseconds: number): string {
+  const minutes = Math.max(1, Math.round(milliseconds / 60_000));
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}시간`;
+  return `${Math.round(hours / 24)}일`;
+}
+
+function formatDate(timestamp: number): string {
+  const diff = timestamp - Date.now();
+  if (diff > 0 && diff < 86_400_000) return `약 ${formatInterval(diff)} 후`;
+  return new Intl.DateTimeFormat('ko-KR', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(timestamp);
 }

@@ -29,14 +29,19 @@ export function makeSchedule(
   overrides: Partial<CardSchedule> & { cardId: string },
 ): CardSchedule {
   return {
-    dueStep: 0,
-    intervalSteps: 40,
-    repetitions: 1,
+    dueAt: Date.now() - 60_000,
+    stability: 10,
+    difficulty: 5,
+    elapsedDays: 10,
+    scheduledDays: 10,
+    learningSteps: 0,
+    reps: 1,
     lapses: 0,
-    ease: 2.3,
+    state: 'review',
+    lastReviewAt: Date.now() - 10 * 86_400_000,
+    minReviewStep: 0,
     lastRating: 'good',
-    lastReviewedStep: 0,
-    firstSeenStep: 0,
+    algorithm: 'fsrs-6',
     ...overrides,
   };
 }

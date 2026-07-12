@@ -63,8 +63,8 @@ export function WordListPage({ onGoStudy }: Props) {
           .slice()
           .sort(
             (a, b) =>
-              (schedules.get(b.id)?.lastReviewedStep ?? -1) -
-              (schedules.get(a.id)?.lastReviewedStep ?? -1),
+              (schedules.get(b.id)?.lastReviewAt ?? -1) -
+              (schedules.get(a.id)?.lastReviewAt ?? -1),
           );
         break;
       default:

@@ -18,6 +18,28 @@ export interface Card {
 
 export interface CardSchedule {
   cardId: string;
+  /** 다음 복습 예정 시각 (UTC epoch milliseconds). */
+  dueAt: number;
+  /** 기억 안정성: 회상률이 90%로 내려가는 데 걸리는 일수. */
+  stability: number;
+  /** 카드별 난이도 (FSRS 범위 1–10). */
+  difficulty: number;
+  elapsedDays: number;
+  scheduledDays: number;
+  learningSteps: number;
+  reps: number;
+  lapses: number;
+  state: 'new' | 'learning' | 'review' | 'relearning';
+  lastReviewAt: number | null;
+  /** Again 카드의 너무 빠른 재등장을 막는 최소 누적 평가 횟수. */
+  minReviewStep: number;
+  lastRating: Rating | null;
+  algorithm: 'fsrs-6';
+}
+
+/** v1/v2 백업과 IndexedDB 업그레이드에서만 읽는 옛 step 기반 상태. */
+export interface LegacyCardSchedule {
+  cardId: string;
   dueStep: number;
   intervalSteps: number;
   repetitions: number;
@@ -34,11 +56,14 @@ export interface ReviewLog {
   stepBefore: number;
   stepAfter: number;
   rating: Rating;
+  /** v1/v2에서는 step, v3에서는 예약 일수. */
   intervalBefore: number;
   intervalAfter: number;
   /** 없으면 최초 배포 스케줄러(v1) 기록으로 간주한다. */
-  schedulerVersion?: 1 | 2;
-  /** 기록 확인/백업용. 스케줄 계산에는 절대 사용하지 않는다. */
+  schedulerVersion?: 1 | 2 | 3;
+  /** v3부터 로그 재생을 손실 없이 하기 위한 평가 직후 FSRS 상태. */
+  scheduleAfter?: CardSchedule;
+  /** 실제 경과시간을 계산하는 FSRS 복습 시각. */
   reviewedAt: string;
 }
 
@@ -54,6 +79,8 @@ export interface Settings {
   animationsEnabled: boolean;
   avoidRecentCount: number;
   showDiagnostics: boolean;
+  /** FSRS가 목표로 하는 회상 확률 (Anki 기본값 0.90). */
+  desiredRetention: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -65,6 +92,7 @@ export const DEFAULT_SETTINGS: Settings = {
   animationsEnabled: true,
   avoidRecentCount: 5,
   showDiagnostics: false,
+  desiredRetention: 0.9,
 };
 
 export type StudyModeType = 'mix' | 'browse' | 'starred' | 'search';

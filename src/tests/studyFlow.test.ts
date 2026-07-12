@@ -3,7 +3,6 @@ import { createDatabase, getMeta, type WordFlipDB } from '../db/database';
 import { META_KEYS } from '../db/schema';
 import { appStore } from '../stores/appStore';
 import {
-  advanceAfterReveal,
   flipCard,
   initApp,
   markCurrentCardKnown,
@@ -16,7 +15,7 @@ import {
 } from '../stores/appActions';
 import { makeCard, uniqueDbName } from './helpers';
 
-describe('학습 흐름 (store 통합)', () => {
+describe('FSRS 학습 흐름 (store 통합)', () => {
   let db: WordFlipDB;
 
   beforeEach(async () => {
@@ -37,156 +36,133 @@ describe('학습 흐름 (store 통합)', () => {
   });
 
   it('초기화 후 첫 카드가 CSV 순서로 선택된다', () => {
-    const s = appStore.getState();
-    expect(s.status).toBe('ready');
-    expect(s.currentCardId).toBe('c1');
-    expect(s.flipped).toBe(false);
+    expect(appStore.getState()).toMatchObject({
+      status: 'ready', currentCardId: 'c1', flipped: false,
+    });
   });
 
-  it('뒤집기 전에는 평가할 수 없다', async () => {
+  it('뒤집기 전에는 네 버튼 평가를 직접 호출해도 기록하지 않는다', async () => {
     await rateCurrentCard('good');
     expect(appStore.getState().studyStep).toBe(0);
     expect(await db.reviewLogs.count()).toBe(0);
   });
 
-  it('뒤집은 뒤 평가하면 studyStep이 오르고 다음 카드로 넘어간다', async () => {
+  it('답을 공개한 뒤 평가하면 FSRS 상태를 저장하고 다음 카드로 간다', async () => {
     flipCard();
-    expect(appStore.getState().flipped).toBe(true);
     await rateCurrentCard('good');
-    const s = appStore.getState();
-    expect(s.studyStep).toBe(1);
-    expect(s.currentCardId).toBe('c2');
-    expect(s.flipped).toBe(false);
-    expect(s.schedules.get('c1')?.intervalSteps).toBe(800);
+    const state = appStore.getState();
+    expect(state.currentCardId).toBe('c2');
+    expect(state.schedules.get('c1')).toMatchObject({
+      algorithm: 'fsrs-6', lastRating: 'good', state: 'review',
+    });
   });
 
   it('앞면 Good은 아는 카드로 저장하고 즉시 다음 카드로 넘어간다', async () => {
     await markCurrentCardKnown();
-    const s = appStore.getState();
-    expect(s.studyStep).toBe(1);
-    expect(s.currentCardId).toBe('c2');
-    expect(s.flipped).toBe(false);
-    expect(s.awaitingAdvance).toBe(false);
-    expect(s.schedules.get('c1')).toMatchObject({
-      lastRating: 'good',
-      intervalSteps: 800,
+    expect(appStore.getState()).toMatchObject({
+      studyStep: 1, currentCardId: 'c2', flipped: false,
     });
+    expect(appStore.getState().schedules.get('c1')?.lastRating).toBe('good');
   });
 
-  it('앞면 탭은 모름을 저장하고 뜻을 유지하며, 다음 탭에서 이동한다', async () => {
+  it('카드 탭은 답만 공개하고 평가 로그를 만들지 않는다', async () => {
     await revealCurrentCardAsUnknown();
-    let s = appStore.getState();
-    expect(s.studyStep).toBe(1);
-    expect(s.currentCardId).toBe('c1');
-    expect(s.flipped).toBe(true);
-    expect(s.awaitingAdvance).toBe(true);
-    expect(s.schedules.get('c1')).toMatchObject({
-      lastRating: 'again',
-      intervalSteps: 3,
-      lapses: 1,
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c1', flipped: true, studyStep: 0,
     });
-
-    advanceAfterReveal();
-    s = appStore.getState();
-    expect(s.currentCardId).toBe('c2');
-    expect(s.flipped).toBe(false);
-    expect(s.awaitingAdvance).toBe(false);
+    expect(appStore.getState().schedules.has('c1')).toBe(false);
+    expect(await db.reviewLogs.count()).toBe(0);
   });
 
-  it('뜻을 공개한 상태에서 다시 모름 처리를 호출해도 중복 기록하지 않는다', async () => {
+  it('답 공개 후 Again을 선택하면 다음 카드로 가며 10분 전 재등장하지 않는다', async () => {
+    const before = Date.now();
     await revealCurrentCardAsUnknown();
-    await revealCurrentCardAsUnknown();
-    expect(appStore.getState().studyStep).toBe(1);
-    expect(await db.reviewLogs.count()).toBe(1);
+    await rateCurrentCard('again');
+    const schedule = appStore.getState().schedules.get('c1');
+    expect(schedule?.dueAt).toBeGreaterThanOrEqual(before + 9 * 60_000);
+    expect(appStore.getState().currentCardId).toBe('c2');
+
+    await markCurrentCardKnown();
+    expect(appStore.getState().currentCardId).toBe('c3');
+    await markCurrentCardKnown();
+    expect(appStore.getState().currentCardId).toBeNull();
   });
 
-  it('빠른 연속 호출은 한 번만 평가된다 (중복 평가 방지)', async () => {
+  it('빠른 연속 평가는 한 번만 기록된다', async () => {
     flipCard();
-    const p1 = rateCurrentCard('good');
-    const p2 = rateCurrentCard('good');
-    await Promise.all([p1, p2]);
+    await Promise.all([rateCurrentCard('good'), rateCurrentCard('good')]);
     expect(appStore.getState().studyStep).toBe(1);
     expect(await db.reviewLogs.count()).toBe(1);
   });
 
-  it('되돌리기: 마지막 평가가 취소되고 해당 카드로 돌아온다', async () => {
+  it('되돌리기는 마지막 평가를 취소하고 그 카드 앞면으로 돌아온다', async () => {
     flipCard();
     await rateCurrentCard('easy');
-    expect(appStore.getState().studyStep).toBe(1);
-
     await undoLast();
-    const s = appStore.getState();
-    expect(s.studyStep).toBe(0);
-    expect(s.currentCardId).toBe('c1');
-    expect(s.schedules.has('c1')).toBe(false);
-    expect(s.flipped).toBe(false);
-    expect(s.awaitingAdvance).toBe(false);
-    expect(s.canUndo).toBe(false);
+    expect(appStore.getState()).toMatchObject({
+      studyStep: 0,
+      currentCardId: 'c1',
+      flipped: false,
+      canUndo: false,
+    });
+    expect(appStore.getState().schedules.has('c1')).toBe(false);
   });
 
-  it('별표 모드에서는 별표 카드만 나온다', () => {
-    setStudyMode({ type: 'starred' });
+  it('전체 둘러보기에서 되돌린 카드를 다시 평가해도 다음 카드를 건너뛰지 않는다', async () => {
+    setStudyMode({ type: 'browse', browseIndex: 0, browseOrder: 'csv' });
+    flipCard();
+    await rateCurrentCard('good');
+    expect(appStore.getState().currentCardId).toBe('c2');
+
+    await undoLast();
+    expect(appStore.getState().mode).toMatchObject({ type: 'browse', browseIndex: 0 });
+    expect(appStore.getState().currentCardId).toBe('c1');
+
+    flipCard();
+    await rateCurrentCard('good');
     expect(appStore.getState().currentCardId).toBe('c2');
   });
 
-  it('검색 모드에서는 검색 결과 밖 카드가 나오지 않는다', () => {
+  it('별표/검색 모드의 대상만 선택한다', () => {
+    setStudyMode({ type: 'starred' });
+    expect(appStore.getState().currentCardId).toBe('c2');
     setStudyMode({ type: 'search', query: 'gam' });
     expect(appStore.getState().currentCardId).toBe('c3');
-  });
-
-  it('검색 결과가 없으면 카드가 null이다', () => {
     setStudyMode({ type: 'search', query: 'zzzz' });
     expect(appStore.getState().currentCardId).toBeNull();
   });
 
-  it('평가 저장 중에는 모드를 바꾸지 않는다', () => {
-    appStore.setState({ isRating: true });
-    setStudyMode({ type: 'starred' });
-    expect(appStore.getState().mode).toEqual({ type: 'mix' });
-    appStore.setState({ isRating: false });
-  });
-
-  it('별표 토글이 즉시 저장된다', async () => {
+  it('별표 토글을 즉시 저장한다', async () => {
     await toggleStar('c1');
     expect(appStore.getState().cards.get('c1')?.starred).toBe(true);
     expect((await db.cards.get('c1'))?.starred).toBe(true);
   });
 
-  it('세션이 저장되어 재시작 후에도 학습 위치가 복원된다', async () => {
-    await markCurrentCardKnown(); // c1 평가 → c2 표시
-    await revealCurrentCardAsUnknown(); // c2 모름 → 뜻을 본 채 다음 탭 대기
-    const before = appStore.getState().currentCardId;
-
-    const session = await getMeta(db, META_KEYS.studySession, null);
-    expect(session).not.toBeNull();
-
-    // 앱 재시작 시뮬레이션
-    appStore.reset();
-    await initApp();
-    const s = appStore.getState();
-    expect(s.currentCardId).toBe(before);
-    expect(s.flipped).toBe(true);
-    expect(s.awaitingAdvance).toBe(true);
-    expect(s.studyStep).toBe(2);
-  });
-
-  it('구버전의 단순 뒤집기 세션은 평가되지 않은 앞면으로 안전하게 복원한다', async () => {
-    await db.meta.put({
-      key: META_KEYS.studySession,
-      value: {
-        mode: { type: 'mix' },
-        currentCardId: 'c1',
-        flipped: true,
-        currentWasDue: false,
-      },
-    });
+  it('평가 없는 답 공개 상태를 재시작 후 그대로 복원한다', async () => {
+    await markCurrentCardKnown();
+    await revealCurrentCardAsUnknown();
+    expect(await db.reviewLogs.count()).toBe(1);
 
     appStore.reset();
     await initApp();
     expect(appStore.getState()).toMatchObject({
-      currentCardId: 'c1',
-      flipped: false,
-      awaitingAdvance: false,
+      currentCardId: 'c2', flipped: true, studyStep: 1,
     });
+  });
+
+  it('구버전 자동 Again 대기 세션은 중복 평가 방지를 위해 앞면으로 복원한다', async () => {
+    await db.meta.put({
+      key: META_KEYS.studySession,
+      value: {
+        mode: { type: 'mix' }, currentCardId: 'c1', flipped: true,
+        currentWasDue: false, awaitingAdvance: true,
+      },
+    });
+    appStore.reset();
+    await initApp();
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c1', flipped: false, awaitingAdvance: false,
+    });
+    expect(await getMeta(db, META_KEYS.studyStep, 0)).toBe(0);
   });
 });
