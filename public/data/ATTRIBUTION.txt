@@ -1,0 +1,24 @@
+Sources and attribution for wordflip_8000_words.csv
+====================================================
+
+1. Multilingual Core Vocabulary, aborasheed (CC BY 4.0)
+   https://huggingface.co/datasets/aborasheed/Multilingual-Core-Vocabulary
+   Used as a bilingual lexical mapping source.
+
+2. Kengdic Korean/English dictionary database (MPL 2.0 or LGPL 2.0+)
+   https://github.com/garfieldnate/kengdic
+   Used conservatively as a fallback lexical mapping source.
+
+3. COCA word-frequency list repository
+   https://github.com/arstgit/high-frequency-vocabulary
+   Used to prioritize frequent spoken/general English lemmas.
+
+4. English Valid Words frequency dataset (Unlicense)
+   https://huggingface.co/datasets/Zoheb/English-Valid-Words
+   Used as the deeper frequency-ranked candidate pool.
+
+5. CMU Pronouncing Dictionary via the Python cmudict package
+   https://github.com/cmusphinx/cmudict
+   Used to generate approximate Hangul pronunciation aids.
+
+The manually curated Korean meanings and generated example templates are included in the produced CSV. Preserve this attribution file when redistributing the dataset.

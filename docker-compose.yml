@@ -1,0 +1,11 @@
+services:
+  wordflip-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - '5173:5173'
+    volumes:
+      - .:/app
+      - /app/node_modules
+    # vite가 0.0.0.0에 바인딩되어 Docker 외부(같은 네트워크의 iPhone)에서 접근 가능
