@@ -19,19 +19,31 @@ export function StudyCard({ card, flipped, animationsEnabled, onFlip }: Props) {
       ].join(' ')}
       role="button"
       tabIndex={0}
-      aria-label={flipped ? '카드를 눌러 앞면 보기' : '카드를 눌러 뜻 보기'}
+      aria-label={
+        flipped
+          ? '카드를 눌러 다음 단어 보기'
+          : '카드를 눌러 뜻을 보고 모르는 단어로 표시'
+      }
       data-testid="study-card"
       onClick={onFlip}
       onKeyDown={(e) => {
+        // 안쪽의 별표/TTS 버튼에서 올라온 키보드 이벤트는 카드 탭이 아니다.
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
+          e.stopPropagation();
           onFlip();
         }
       }}
     >
       <div className="study-card__inner">
         {/* 앞면 */}
-        <div className="study-card__face study-card__front" aria-hidden={flipped}>
+        <div
+          className="study-card__face study-card__front"
+          aria-hidden={flipped}
+          inert={flipped ? true : undefined}
+          data-testid="study-card-front"
+        >
           <div className="study-card__top">
             <div className="study-card__chips">
               {card.partOfSpeech && (
@@ -52,11 +64,18 @@ export function StudyCard({ card, flipped, animationsEnabled, onFlip }: Props) {
             </p>
             <TtsButton text={card.word} label="영어 발음 재생" />
           </div>
-          <p className="study-card__hint">카드를 눌러 뜻 보기</p>
+          <p className="study-card__hint">
+            모르면 카드를 눌러 뜻 보기
+          </p>
         </div>
 
         {/* 뒷면 */}
-        <div className="study-card__face study-card__back" aria-hidden={!flipped}>
+        <div
+          className="study-card__face study-card__back"
+          aria-hidden={!flipped}
+          inert={!flipped ? true : undefined}
+          data-testid="study-card-back"
+        >
           <div className="study-card__top">
             <div className="study-card__word-row">
               <p className="study-card__word study-card__word--back" lang="en">

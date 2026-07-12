@@ -29,6 +29,8 @@ export interface StudySession {
   currentCardId: string | null;
   flipped: boolean;
   currentWasDue: boolean;
+  /** v2.1 이전 세션에는 없으므로 복원할 때 true 여부만 확인한다. */
+  awaitingAdvance?: boolean;
 }
 
 export interface MetaShape {

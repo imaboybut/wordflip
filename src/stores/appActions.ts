@@ -99,7 +99,10 @@ export async function initApp(): Promise<void> {
       setState({
         mode: session.mode,
         currentCardId: session.currentCardId,
-        flipped: session.flipped,
+        // 이전 버전에서 단순히 뒤집어 둔 카드는 평가 여부가 불명확하다.
+        // 새 흐름에서 저장한 대기 상태만 뒷면으로 안전하게 복원한다.
+        flipped: session.awaitingAdvance === true,
+        awaitingAdvance: session.awaitingAdvance === true,
         currentWasDue: session.currentWasDue,
         status: 'ready',
       });
@@ -158,6 +161,7 @@ function persistSession(): void {
     currentCardId: s.currentCardId,
     flipped: s.flipped,
     currentWasDue: s.currentWasDue,
+    awaitingAdvance: s.awaitingAdvance,
   };
   void setMeta(activeDb, META_KEYS.studySession, session).catch(() => {
     // 세션 저장 실패는 학습 흐름을 막지 않는다
@@ -175,7 +179,12 @@ export function advanceToNextCard(): void {
         ? seededShuffle(deckIds, state.newOrderSeed)
         : deckIds;
     const { cardId } = selectBrowseCard(order, state.mode.browseIndex ?? 0);
-    setState({ currentCardId: cardId, flipped: false, currentWasDue: false });
+    setState({
+      currentCardId: cardId,
+      flipped: false,
+      awaitingAdvance: false,
+      currentWasDue: false,
+    });
     persistSession();
     return;
   }
@@ -195,15 +204,60 @@ export function advanceToNextCard(): void {
     currentCardId: result.cardId,
     currentWasDue: result.isDueReview,
     flipped: false,
+    awaitingAdvance: false,
   });
   persistSession();
 }
 
 export function flipCard(): void {
   const s = getState();
-  if (s.currentCardId === null || s.isRating) return;
+  if (s.currentCardId === null || s.isRating || s.awaitingAdvance) return;
   setState({ flipped: !s.flipped });
   persistSession();
+}
+
+/**
+ * 앞면을 눌렀을 때 뜻을 공개하고 즉시 Again(모름)을 저장한다.
+ * 다음 카드는 아직 보여주지 않고, 뒷면을 한 번 더 누를 때까지 기다린다.
+ */
+export async function revealCurrentCardAsUnknown(): Promise<void> {
+  const s = getState();
+  if (
+    s.currentCardId === null ||
+    s.flipped ||
+    s.awaitingAdvance ||
+    s.isRating
+  ) {
+    return;
+  }
+  setState({ flipped: true });
+  await commitCurrentRating('again', { allowFront: true, advance: false });
+}
+
+/** 앞면의 Good 버튼: 안다고 저장하고 곧바로 다음 카드로 이동한다. */
+export async function markCurrentCardKnown(): Promise<void> {
+  const s = getState();
+  if (
+    s.currentCardId === null ||
+    s.flipped ||
+    s.awaitingAdvance ||
+    s.isRating
+  ) {
+    return;
+  }
+  await commitCurrentRating('good', { allowFront: true, advance: true });
+}
+
+/** 모름 처리 후 공개된 뒷면에서 다음 카드로 이동한다. */
+export function advanceAfterReveal(): void {
+  const s = getState();
+  if (!s.awaitingAdvance || s.isRating) return;
+  if (s.mode.type === 'browse') {
+    setState({
+      mode: { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 },
+    });
+  }
+  advanceToNextCard();
 }
 
 /** browse 모드에서 평가 없이 다음 카드로 */
@@ -218,14 +272,54 @@ export function skipCard(): void {
 // ---------- 평가 ----------
 
 export async function rateCurrentCard(rating: Rating): Promise<void> {
+  await commitCurrentRating(rating, { allowFront: false, advance: true });
+}
+
+interface CommitRatingOptions {
+  allowFront: boolean;
+  advance: boolean;
+}
+
+async function commitCurrentRating(
+  rating: Rating,
+  options: CommitRatingOptions,
+): Promise<void> {
   const s = getState();
   // 뒤집기 전 평가 불가 + 처리 중 잠금 (빠른 연속 터치 중복 평가 방지)
-  if (s.currentCardId === null || !s.flipped || s.isRating) return;
+  if (
+    s.currentCardId === null ||
+    (!options.allowFront && !s.flipped) ||
+    s.awaitingAdvance ||
+    s.isRating
+  ) {
+    return;
+  }
   const cardId = s.currentCardId;
+  const sessionAfterRating: StudySession = options.advance
+    ? {
+        mode: s.mode,
+        currentCardId: null,
+        flipped: false,
+        currentWasDue: false,
+        awaitingAdvance: false,
+      }
+    : {
+        mode: s.mode,
+        currentCardId: cardId,
+        flipped: true,
+        currentWasDue: s.currentWasDue,
+        awaitingAdvance: true,
+      };
 
   setState({ isRating: true });
   try {
-    const outcome = await applyRating(activeDb, cardId, rating, s.currentWasDue);
+    const outcome = await applyRating(
+      activeDb,
+      cardId,
+      rating,
+      s.currentWasDue,
+      { studySession: sessionAfterRating },
+    );
 
     const schedules = new Map(s.schedules);
     schedules.set(cardId, outcome.schedule);
@@ -239,12 +333,25 @@ export async function rateCurrentCard(rating: Rating): Promise<void> {
       canUndo: true,
     });
 
-    if (s.mode.type === 'browse') {
-      const mode = { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 };
-      setState({ mode });
+    if (options.advance) {
+      if (s.mode.type === 'browse') {
+        const mode = { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 };
+        setState({ mode });
+      }
+      advanceToNextCard();
+    } else {
+      setState({
+        currentCardId: cardId,
+        flipped: true,
+        awaitingAdvance: true,
+      });
+      persistSession();
     }
-    advanceToNextCard();
   } catch (err) {
+    if (!options.advance) {
+      setState({ flipped: false, awaitingAdvance: false });
+      persistSession();
+    }
     showToast(
       err instanceof Error ? err.message : '평가를 저장하지 못했습니다.',
     );
@@ -258,7 +365,7 @@ export async function undoLast(): Promise<void> {
   if (s.isRating || !s.canUndo) return;
   setState({ isRating: true });
   try {
-    const outcome = await undoLastReview(activeDb);
+    const outcome = await undoLastReview(activeDb, { studyMode: s.mode });
     if (outcome === null) {
       setState({ canUndo: false });
       return;
@@ -276,7 +383,8 @@ export async function undoLast(): Promise<void> {
       canUndo: false,
       currentCardId: outcome.cardId,
       currentWasDue: false,
-      flipped: true,
+      flipped: false,
+      awaitingAdvance: false,
     });
     persistSession();
     showToast('마지막 평가를 되돌렸습니다.');
@@ -290,7 +398,14 @@ export async function undoLast(): Promise<void> {
 // ---------- 모드 ----------
 
 export function setStudyMode(mode: StudyMode): void {
-  setState({ mode, currentCardId: null, flipped: false, currentWasDue: false });
+  if (getState().isRating) return;
+  setState({
+    mode,
+    currentCardId: null,
+    flipped: false,
+    awaitingAdvance: false,
+    currentWasDue: false,
+  });
   advanceToNextCard();
 }
 
@@ -423,6 +538,7 @@ async function reloadFromDb(): Promise<void> {
     canUndo: false,
     currentCardId: null,
     flipped: false,
+    awaitingAdvance: false,
   });
   advanceToNextCard();
 }

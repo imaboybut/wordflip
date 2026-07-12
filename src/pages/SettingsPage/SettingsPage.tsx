@@ -12,6 +12,17 @@ export function SettingsPage() {
     return tts.onVoicesChanged(() => setVoices(tts.getEnglishVoices()));
   }, []);
 
+  useEffect(() => {
+    if (
+      settings.ttsVoiceURI &&
+      voices.length > 0 &&
+      !voices.some((voice) => voice.voiceURI === settings.ttsVoiceURI)
+    ) {
+      // 이전 버전이 저장한 비영어/효과음/원격 자동 음성은 안전한 자동 모드로 복구.
+      void updateSettings({ ttsVoiceURI: null });
+    }
+  }, [settings.ttsVoiceURI, voices]);
+
   return (
     <div className="settings-page">
       <section className="panel">
@@ -75,14 +86,6 @@ export function SettingsPage() {
             ))}
           </div>
         </div>
-        <label className="switch-row">
-          <span>스와이프로 평가</span>
-          <input
-            type="checkbox"
-            checked={settings.swipeEnabled}
-            onChange={(e) => void updateSettings({ swipeEnabled: e.target.checked })}
-          />
-        </label>
         <label className="field">
           <span className="field__label">
             최근 카드 반복 방지 개수: {settings.avoidRecentCount}
@@ -132,7 +135,11 @@ export function SettingsPage() {
                   })
                 }
               >
-                <option value="">자동 (en-US 우선)</option>
+                <option value="">
+                  {voices[0]
+                    ? `자동 — ${voices[0].name} (${voices[0].lang})`
+                    : '자동 — 자연스러운 미국 영어 우선'}
+                </option>
                 {voices.map((v) => (
                   <option key={v.voiceURI} value={v.voiceURI}>
                     {v.name} ({v.lang})
@@ -154,7 +161,8 @@ export function SettingsPage() {
               🔊 테스트 재생
             </button>
             <p className="panel__note">
-              iPhone에서 음성 목록은 처음 재생 후에 채워질 수 있습니다.
+              자동 모드는 iPhone의 효과음·캐릭터 음성을 제외하고 자연스러운 로컬
+              영어 음성을 우선합니다. 목록은 첫 재생 후 채워질 수 있습니다.
             </p>
           </>
         ) : (

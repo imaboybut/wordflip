@@ -362,6 +362,11 @@ textarea.input {
   touch-action: none;
 }
 
+.swipe-zone--tap-only {
+  /* 단순 탭 모드에서는 긴 카드 뒷면을 iPhone에서 세로 스크롤할 수 있다. */
+  touch-action: pan-y;
+}
+
 .swipe-zone__inner {
   flex: 1;
   display: flex;
@@ -592,6 +597,14 @@ textarea.input {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
+}
+
+.rating-buttons--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rating-buttons--single .rating-button {
+  min-height: 68px;
 }
 
 .rating-button {

@@ -210,7 +210,7 @@ export function SwipeCard({
   return (
     <div
       ref={zoneRef}
-      className="swipe-zone"
+      className={`swipe-zone ${swipeEnabled ? '' : 'swipe-zone--tap-only'}`}
       data-testid="swipe-zone"
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}

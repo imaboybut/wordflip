@@ -5,12 +5,18 @@ import type {
   ReviewLog,
 } from '../types';
 import { EMPTY_RATING_COUNTS } from '../types';
-import { rateCard } from '../scheduler/stepScheduler';
+import { rateCard, rateCardLegacyV1 } from '../scheduler/stepScheduler';
 import { getMeta, setMeta, type WordFlipDB } from '../db/database';
-import { META_KEYS } from '../db/schema';
+import { META_KEYS, type StudySession } from '../db/schema';
 import { uid } from '../utils/uid';
 
 const MAX_RECENT_KEPT = 30;
+const CURRENT_SCHEDULER_VERSION = 2 as const;
+
+export interface ApplyRatingOptions {
+  /** 평가와 한 트랜잭션으로 저장할 다음 화면 상태 */
+  studySession?: StudySession;
+}
 
 export interface ReviewOutcome {
   schedule: CardSchedule;
@@ -40,6 +46,11 @@ export interface UndoOutcome {
   ratingCounts: RatingCounts;
 }
 
+export interface UndoReviewOptions {
+  /** 앱 화면에서 호출할 때 undo 결과와 원자적으로 복원할 학습 모드 */
+  studyMode?: StudySession['mode'];
+}
+
 /** 같은 카드가 빠른 연속 터치로 두 번 평가되는 것을 막는 프로세스 내 잠금 */
 let ratingInFlight = false;
 
@@ -57,6 +68,7 @@ export async function applyRating(
   cardId: string,
   rating: Rating,
   wasDueReview: boolean,
+  options: ApplyRatingOptions = {},
 ): Promise<ReviewOutcome> {
   if (ratingInFlight) {
     throw new Error('이전 평가가 아직 처리 중입니다.');
@@ -82,6 +94,7 @@ export async function applyRating(
           rating,
           intervalBefore: prev?.intervalSteps ?? 0,
           intervalAfter: schedule.intervalSteps,
+          schedulerVersion: CURRENT_SCHEDULER_VERSION,
           reviewedAt: new Date().toISOString(),
         };
 
@@ -110,7 +123,7 @@ export async function applyRating(
           prevRatingCounts: prevCounts,
         };
 
-        await Promise.all([
+        const writes: PromiseLike<unknown>[] = [
           setMeta(dbi, META_KEYS.studyStep, stepAfter),
           dbi.schedules.put(schedule),
           dbi.reviewLogs.add(log),
@@ -118,7 +131,13 @@ export async function applyRating(
           setMeta(dbi, META_KEYS.reviewStreak, reviewStreak),
           setMeta(dbi, META_KEYS.ratingCounts, ratingCounts),
           setMeta(dbi, META_KEYS.lastUndo, undo),
-        ]);
+        ];
+        if (options.studySession) {
+          writes.push(
+            setMeta(dbi, META_KEYS.studySession, options.studySession),
+          );
+        }
+        await Promise.all(writes);
 
         return {
           schedule,
@@ -138,6 +157,7 @@ export async function applyRating(
 /** 마지막 평가 한 번 되돌리기 */
 export async function undoLastReview(
   dbi: WordFlipDB,
+  options: UndoReviewOptions = {},
 ): Promise<UndoOutcome | null> {
   return dbi.transaction(
     'rw',
@@ -151,14 +171,26 @@ export async function undoLastReview(
       } else {
         await dbi.schedules.put(undo.prevSchedule);
       }
-      await Promise.all([
+      const writes: PromiseLike<unknown>[] = [
         dbi.reviewLogs.delete(undo.logId),
         setMeta(dbi, META_KEYS.studyStep, undo.prevStudyStep),
         setMeta(dbi, META_KEYS.recentIds, undo.prevRecentIds),
         setMeta(dbi, META_KEYS.reviewStreak, undo.prevReviewStreak),
         setMeta(dbi, META_KEYS.ratingCounts, undo.prevRatingCounts),
         setMeta(dbi, META_KEYS.lastUndo, null),
-      ]);
+      ];
+      if (options.studyMode) {
+        writes.push(
+          setMeta(dbi, META_KEYS.studySession, {
+            mode: options.studyMode,
+            currentCardId: undo.cardId,
+            flipped: false,
+            currentWasDue: false,
+            awaitingAdvance: false,
+          } satisfies StudySession),
+        );
+      }
+      await Promise.all(writes);
 
       return {
         cardId: undo.cardId,
@@ -191,7 +223,11 @@ export async function rebuildSchedulesFromLogs(dbi: WordFlipDB): Promise<{
       for (const log of logs) {
         step += 1;
         const prev = map.get(log.cardId) ?? null;
-        map.set(log.cardId, rateCard(prev, log.cardId, log.rating, step));
+        const next =
+          log.schedulerVersion === CURRENT_SCHEDULER_VERSION
+            ? rateCard(prev, log.cardId, log.rating, step)
+            : rateCardLegacyV1(prev, log.cardId, log.rating, step);
+        map.set(log.cardId, next);
         counts[log.rating] += 1;
       }
       const schedules = [...map.values()];

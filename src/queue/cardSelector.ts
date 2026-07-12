@@ -8,7 +8,7 @@ import type { SelectionResult, SelectorContext } from './queueTypes';
  * 3. 신규 카드 소진 시 예정 카드 또는 가장 오래 보지 않은 카드
  * 4. 최근 N장(기본 5)에 나온 카드는 가능하면 제외, 대안이 없을 때만 허용
  * 5. 같은 카드의 즉시 연속 등장 금지 (카드가 한 장뿐인 경우 제외)
- * 6. due 카드가 여럿이면 dueStep 오름차순, 같으면 lastReviewedStep 오름차순
+ * 6. due 카드가 여럿이면 오답 보너스를 주되, 오래 밀린 카드는 결국 추월
  */
 export function selectNextCard(ctx: SelectorContext): SelectionResult {
   const {
@@ -89,8 +89,13 @@ function collectDue(
   for (const s of schedules.values()) {
     if (s.dueStep <= studyStep && deckSet.has(s.cardId)) due.push(s);
   }
-  // 규칙 6: dueStep 오름차순 → lastReviewedStep 오름차순 → id (안정성)
+  // 규칙 6: 직전에도 틀린 카드에는 최대 48 step의 우선 보너스를 준다.
+  // dueStep보다 절대 우선하지 않으므로 오래 밀린 일반 카드도 결국 추월해
+  // 특정 오답 카드 묶음만 영원히 순환하는 starvation을 막는다.
   due.sort((a, b) => {
+    const aPriorityDue = effectiveDueStep(a);
+    const bPriorityDue = effectiveDueStep(b);
+    if (aPriorityDue !== bPriorityDue) return aPriorityDue - bPriorityDue;
     if (a.dueStep !== b.dueStep) return a.dueStep - b.dueStep;
     const la = a.lastReviewedStep ?? -1;
     const lb = b.lastReviewedStep ?? -1;
@@ -98,6 +103,12 @@ function collectDue(
     return a.cardId < b.cardId ? -1 : 1;
   });
   return due;
+}
+
+function effectiveDueStep(schedule: CardSchedule): number {
+  if (schedule.lastRating !== 'again') return schedule.dueStep;
+  const lapseBoost = Math.min(Math.max(schedule.lapses, 0), 12) * 3;
+  return schedule.dueStep - 12 - lapseBoost;
 }
 
 /** 전체 둘러보기 모드: due 여부와 무관하게 순서대로 순환 */

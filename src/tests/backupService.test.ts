@@ -138,7 +138,7 @@ describe('CSV import 병합/교체', () => {
     expect(await db.cards.count()).toBe(2);
     const preserved = await db.schedules.get('new-1');
     expect(preserved).toBeDefined();
-    expect(preserved?.intervalSteps).toBe(40);
+    expect(preserved?.intervalSteps).toBe(800);
     expect(await db.reviewLogs.count()).toBe(1);
   });
 

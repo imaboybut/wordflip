@@ -36,6 +36,8 @@ export interface ReviewLog {
   rating: Rating;
   intervalBefore: number;
   intervalAfter: number;
+  /** 없으면 최초 배포 스케줄러(v1) 기록으로 간주한다. */
+  schedulerVersion?: 1 | 2;
   /** 기록 확인/백업용. 스케줄 계산에는 절대 사용하지 않는다. */
   reviewedAt: string;
 }

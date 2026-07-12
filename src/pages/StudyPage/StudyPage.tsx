@@ -2,15 +2,15 @@ import { useEffect, useMemo } from 'react';
 import type { Rating } from '../../types';
 import { useAppState } from '../../stores/appStore';
 import {
-  flipCard,
-  rateCurrentCard,
+  advanceAfterReveal,
+  markCurrentCardKnown,
+  revealCurrentCardAsUnknown,
   setStudyMode,
   skipCard,
   undoLast,
 } from '../../stores/appActions';
 import { StudyCard } from '../../components/StudyCard/StudyCard';
 import { SwipeCard } from '../../components/SwipeCard/SwipeCard';
-import { RatingButtons } from '../../components/RatingButtons/RatingButtons';
 import { rateCard } from '../../scheduler/stepScheduler';
 
 export function StudyPage() {
@@ -23,6 +23,7 @@ export function StudyPage() {
     mode,
     currentCardId,
     flipped,
+    awaitingAdvance,
     isRating,
     canUndo,
   } = state;
@@ -37,24 +38,16 @@ export function StudyPage() {
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       }
       if (e.key === ' ' || e.key === 'Enter') {
-        // 카드에 포커스가 없더라도 Space로 뒤집기
+        // 카드에 포커스가 없어도 키보드로 같은 한-탭 흐름을 사용할 수 있다.
         if (e.target instanceof HTMLElement && e.target.closest('button')) return;
         e.preventDefault();
-        flipCard();
-      } else if (flipped && !isRating) {
-        const map: Record<string, Rating> = {
-          '1': 'again',
-          '2': 'hard',
-          '3': 'good',
-          '4': 'easy',
-        };
-        const rating = map[e.key];
-        if (rating) void rateCurrentCard(rating);
+        if (awaitingAdvance) advanceAfterReveal();
+        else if (!flipped) void revealCurrentCardAsUnknown();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [flipped, isRating]);
+  }, [awaitingAdvance, flipped]);
 
   const stats = useMemo(() => {
     let starredCount = 0;
@@ -78,6 +71,15 @@ export function StudyPage() {
   }, [settings.showDiagnostics, card, schedules, studyStep]);
 
   const emptyMessage = getEmptyMessage();
+
+  const handleCardTap = () => {
+    if (isRating) return;
+    if (awaitingAdvance) {
+      advanceAfterReveal();
+    } else if (!flipped) {
+      void revealCurrentCardAsUnknown();
+    }
+  };
 
   function getEmptyMessage(): string | null {
     if (card) return null;
@@ -150,11 +152,11 @@ export function StudyPage() {
       <main className="study-page__card-area">
         {card ? (
           <SwipeCard
-            canRate={flipped && !isRating}
-            swipeEnabled={settings.swipeEnabled}
+            canRate={false}
+            swipeEnabled={false}
             animationsEnabled={settings.animationsEnabled}
-            onRate={(r) => void rateCurrentCard(r)}
-            onTap={flipCard}
+            onRate={() => {}}
+            onTap={handleCardTap}
           >
             <StudyCard
               card={card}
@@ -162,7 +164,7 @@ export function StudyPage() {
               animationsEnabled={settings.animationsEnabled}
               onFlip={() => {
                 /* 탭 처리는 SwipeCard의 onTap에서 담당. 클릭(키보드)만 여기로 온다 */
-                flipCard();
+                handleCardTap();
               }}
             />
           </SwipeCard>
@@ -175,6 +177,35 @@ export function StudyPage() {
       </main>
 
       <footer className="study-page__footer">
+        {!flipped && card ? (
+          <div
+            className="rating-buttons rating-buttons--single"
+            role="group"
+            aria-label="카드 평가"
+          >
+            <button
+              type="button"
+              className="rating-button rating-button--good"
+              disabled={isRating}
+              onClick={() => void markCurrentCardKnown()}
+              aria-label="아는 단어로 표시하고 다음 카드 보기"
+            >
+              <span className="rating-button__en">Good</span>
+              <span className="rating-button__ko">알아요 · 다음 단어</span>
+              {previews && (
+                <span className="rating-button__preview">+{previews.good}</span>
+              )}
+            </button>
+          </div>
+        ) : (
+          <p className="study-page__flip-hint" aria-hidden="true">
+            {card
+              ? awaitingAdvance
+                ? '뜻을 확인한 뒤 카드를 한 번 더 누르면 다음 단어로 넘어갑니다'
+                : '카드를 눌러 뜻을 확인하세요'
+              : ''}
+          </p>
+        )}
         <div className="study-page__footer-row">
           <button
             type="button"
@@ -207,17 +238,6 @@ export function StudyPage() {
             </>
           )}
         </div>
-        {flipped && card ? (
-          <RatingButtons
-            disabled={isRating}
-            onRate={(r) => void rateCurrentCard(r)}
-            previews={previews}
-          />
-        ) : (
-          <p className="study-page__flip-hint" aria-hidden="true">
-            {card ? '카드를 눌러 뜻을 확인하세요' : ''}
-          </p>
-        )}
       </footer>
     </div>
   );

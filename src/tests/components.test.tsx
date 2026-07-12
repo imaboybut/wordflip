@@ -23,7 +23,7 @@ describe('StudyCard', () => {
       <StudyCard card={card} flipped={false} animationsEnabled={false} onFlip={onFlip} />,
     );
     expect(screen.getAllByText('steadily').length).toBeGreaterThan(0);
-    expect(screen.getByText('카드를 눌러 뜻 보기')).toBeInTheDocument();
+    expect(screen.getByText('모르면 카드를 눌러 뜻 보기')).toBeInTheDocument();
 
     await userEvent.click(screen.getByTestId('study-card'));
     expect(onFlip).toHaveBeenCalledTimes(1);
@@ -41,12 +41,40 @@ describe('StudyCard', () => {
     ).toBeInTheDocument();
   });
 
+  it('보이지 않는 카드 면은 inert로 포커스 탐색에서 제외한다', () => {
+    const view = render(
+      <StudyCard card={card} flipped={false} animationsEnabled={false} onFlip={() => {}} />,
+    );
+    expect(screen.getByTestId('study-card-front')).not.toHaveAttribute('inert');
+    expect(screen.getByTestId('study-card-back')).toHaveAttribute('inert');
+
+    view.rerender(
+      <StudyCard card={card} flipped animationsEnabled={false} onFlip={() => {}} />,
+    );
+    expect(screen.getByTestId('study-card-front')).toHaveAttribute('inert');
+    expect(screen.getByTestId('study-card-back')).not.toHaveAttribute('inert');
+  });
+
   it('별표 클릭은 카드 뒤집기로 전파되지 않는다', async () => {
     const onFlip = vi.fn();
     render(
       <StudyCard card={card} flipped={false} animationsEnabled={false} onFlip={onFlip} />,
     );
     await userEvent.click(screen.getAllByRole('button', { name: '별표 표시' })[0]);
+    expect(onFlip).not.toHaveBeenCalled();
+  });
+
+  it('별표/TTS 버튼의 키보드 이벤트도 카드 탭으로 전파되지 않는다', () => {
+    const onFlip = vi.fn();
+    render(
+      <StudyCard card={card} flipped={false} animationsEnabled={false} onFlip={onFlip} />,
+    );
+    fireEvent.keyDown(screen.getAllByRole('button', { name: '별표 표시' })[0], {
+      key: 'Enter',
+    });
+    fireEvent.keyDown(screen.getByRole('button', { name: '영어 발음 재생' }), {
+      key: ' ',
+    });
     expect(onFlip).not.toHaveBeenCalled();
   });
 
@@ -176,6 +204,21 @@ describe('SwipeCard 제스처', () => {
     fireEvent.pointerUp(zone, { pointerId: 1, clientX: 302, clientY: 301 });
     expect(onTap).toHaveBeenCalledTimes(1);
     expect(onRate).not.toHaveBeenCalled();
+  });
+
+  it('스와이프 비활성화 시 세로 스크롤 가능한 탭 전용 영역이 된다', () => {
+    render(
+      <SwipeCard
+        canRate={false}
+        swipeEnabled={false}
+        animationsEnabled={false}
+        onRate={() => {}}
+        onTap={() => {}}
+      >
+        <div>card</div>
+      </SwipeCard>,
+    );
+    expect(screen.getByTestId('swipe-zone')).toHaveClass('swipe-zone--tap-only');
   });
 
   it('스와이프 중 평가 방향 미리보기가 표시된다', () => {

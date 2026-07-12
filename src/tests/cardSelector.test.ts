@@ -39,7 +39,7 @@ describe('큐 선택 규칙', () => {
     expect(result.isDueReview).toBe(true);
   });
 
-  it('due 카드 여러 개면 dueStep 작은 순 → lastReviewedStep 작은 순', () => {
+  it('같은 난이도의 due 카드는 dueStep 작은 순 → lastReviewedStep 작은 순', () => {
     const schedules = scheduleMap([
       makeSchedule({ cardId: 'a', dueStep: 8, lastReviewedStep: 3 }),
       makeSchedule({ cardId: 'b', dueStep: 5, lastReviewedStep: 4 }),
@@ -49,6 +49,79 @@ describe('큐 선택 규칙', () => {
       ctx({ studyStep: 10, schedules, deckIds: ['a', 'b', 'c'] }),
     );
     expect(result.cardId).toBe('c');
+  });
+
+  it('직전에도 Again인 due 카드를 더 오래 밀린 일반 카드보다 우선한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({
+        cardId: 'known',
+        dueStep: 1,
+        lapses: 0,
+        lastRating: 'good',
+      }),
+      makeSchedule({
+        cardId: 'missed',
+        dueStep: 9,
+        lapses: 1,
+        lastRating: 'again',
+      }),
+    ]);
+    const result = selectNextCard(
+      ctx({ studyStep: 10, schedules, deckIds: ['known', 'missed'] }),
+    );
+    expect(result.cardId).toBe('missed');
+  });
+
+  it('직전 Again 카드끼리는 누적 오답이 많은 카드를 우선한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'few', dueStep: 1, lapses: 1, lastRating: 'again' }),
+      makeSchedule({ cardId: 'many', dueStep: 9, lapses: 4, lastRating: 'again' }),
+    ]);
+    const result = selectNextCard(
+      ctx({ studyStep: 10, schedules, deckIds: ['few', 'many'] }),
+    );
+    expect(result.cardId).toBe('many');
+  });
+
+  it('오답 우선순위가 높아도 최근 카드 회피는 유지한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({ cardId: 'regular', dueStep: 1, lastRating: 'good' }),
+      makeSchedule({
+        cardId: 'missed',
+        dueStep: 9,
+        lapses: 5,
+        lastRating: 'again',
+      }),
+    ]);
+    const result = selectNextCard(
+      ctx({
+        studyStep: 10,
+        schedules,
+        deckIds: ['regular', 'missed'],
+        recentIds: ['missed'],
+      }),
+    );
+    expect(result.cardId).toBe('regular');
+  });
+
+  it('아주 오래 밀린 일반 due 카드는 반복 오답 카드를 결국 추월한다', () => {
+    const schedules = scheduleMap([
+      makeSchedule({
+        cardId: 'starved',
+        dueStep: 1,
+        lastRating: 'good',
+      }),
+      makeSchedule({
+        cardId: 'missed',
+        dueStep: 90,
+        lapses: 100,
+        lastRating: 'again',
+      }),
+    ]);
+    const result = selectNextCard(
+      ctx({ studyStep: 100, schedules, deckIds: ['starved', 'missed'] }),
+    );
+    expect(result.cardId).toBe('starved');
   });
 
   it('복습 카드 3연속 후에는 신규 카드 1장을 보여준다', () => {

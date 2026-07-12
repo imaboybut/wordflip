@@ -33,8 +33,8 @@ describe('복습 트랜잭션', () => {
 
   it('스케줄, 로그, 최근 목록, 통계가 모두 함께 갱신된다', async () => {
     const outcome = await applyRating(db, 'c1', 'good', false);
-    expect(outcome.schedule.intervalSteps).toBe(40);
-    expect(outcome.schedule.dueStep).toBe(41);
+    expect(outcome.schedule.intervalSteps).toBe(800);
+    expect(outcome.schedule.dueStep).toBe(801);
 
     const logs = await db.reviewLogs.toArray();
     expect(logs).toHaveLength(1);
@@ -44,7 +44,8 @@ describe('복습 트랜잭션', () => {
       stepAfter: 1,
       rating: 'good',
       intervalBefore: 0,
-      intervalAfter: 40,
+      intervalAfter: 800,
+      schedulerVersion: 2,
     });
 
     expect(await getMeta(db, META_KEYS.recentIds, [])).toEqual(['c1']);
@@ -60,6 +61,20 @@ describe('복습 트랜잭션', () => {
     expect(await getMeta(db, META_KEYS.reviewStreak, -1)).toBe(2);
     await applyRating(db, 'c1', 'good', false);
     expect(await getMeta(db, META_KEYS.reviewStreak, -1)).toBe(0);
+  });
+
+  it('평가와 다음 화면 세션을 같은 트랜잭션에서 저장한다', async () => {
+    const studySession = {
+      mode: { type: 'mix' as const },
+      currentCardId: 'c1',
+      flipped: true,
+      currentWasDue: false,
+      awaitingAdvance: true,
+    };
+    await applyRating(db, 'c1', 'again', false, { studySession });
+    expect(await getMeta(db, META_KEYS.studySession, null)).toEqual(
+      studySession,
+    );
   });
 
   it('마지막 평가 한 번 되돌리기', async () => {
@@ -88,6 +103,26 @@ describe('복습 트랜잭션', () => {
     expect(await getMeta(db, META_KEYS.studyStep, -1)).toBe(1);
   });
 
+  it('되돌리기와 앞면 학습 세션을 같은 트랜잭션에서 복원한다', async () => {
+    await applyRating(db, 'c1', 'again', false, {
+      studySession: {
+        mode: { type: 'mix' },
+        currentCardId: 'c1',
+        flipped: true,
+        currentWasDue: false,
+        awaitingAdvance: true,
+      },
+    });
+    await undoLastReview(db, { studyMode: { type: 'starred' } });
+    expect(await getMeta(db, META_KEYS.studySession, null)).toEqual({
+      mode: { type: 'starred' },
+      currentCardId: 'c1',
+      flipped: false,
+      currentWasDue: false,
+      awaitingAdvance: false,
+    });
+  });
+
   it('복습 로그로 전체 스케줄을 재계산할 수 있다', async () => {
     await applyRating(db, 'c1', 'good', false);
     await applyRating(db, 'c2', 'again', false);
@@ -114,6 +149,40 @@ describe('복습 트랜잭션', () => {
     const sortById = (arr: typeof after) =>
       arr.slice().sort((a, b) => a.cardId.localeCompare(b.cardId));
     expect(sortById(after)).toEqual(sortById(expected));
+  });
+
+  it('버전 없는 기존 로그는 최초 배포 공식으로 복구한다', async () => {
+    await db.reviewLogs.bulkAdd([
+      {
+        id: 'legacy-1',
+        cardId: 'c1',
+        stepBefore: 0,
+        stepAfter: 1,
+        rating: 'good',
+        intervalBefore: 0,
+        intervalAfter: 40,
+        reviewedAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'legacy-2',
+        cardId: 'c1',
+        stepBefore: 1,
+        stepAfter: 2,
+        rating: 'good',
+        intervalBefore: 40,
+        intervalAfter: 92,
+        reviewedAt: '2026-01-01T00:00:01.000Z',
+      },
+    ]);
+
+    const rebuilt = await rebuildSchedulesFromLogs(db);
+    expect(rebuilt.studyStep).toBe(2);
+    expect(rebuilt.schedules[0]).toMatchObject({
+      cardId: 'c1',
+      intervalSteps: 92,
+      dueStep: 94,
+      repetitions: 2,
+    });
   });
 
   it('동시에 두 번 호출하면 두 번째는 거부된다 (중복 평가 방지)', async () => {

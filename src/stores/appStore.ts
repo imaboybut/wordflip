@@ -31,6 +31,8 @@ export interface AppState {
   currentCardId: string | null;
   currentWasDue: boolean;
   flipped: boolean;
+  /** 모름 평가를 저장한 뒤, 현재 뒷면에서 다음 탭을 기다리는 상태 */
+  awaitingAdvance: boolean;
   isRating: boolean;
   canUndo: boolean;
 
@@ -54,6 +56,7 @@ export const initialAppState: AppState = {
   currentCardId: null,
   currentWasDue: false,
   flipped: false,
+  awaitingAdvance: false,
   isRating: false,
   canUndo: false,
   seedReport: null,
