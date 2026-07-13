@@ -1,4 +1,6 @@
 /// <reference types="vitest/config" />
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -6,9 +8,16 @@ import { VitePWA } from 'vite-plugin-pwa';
 // GitHub Pages는 https://USERNAME.github.io/REPOSITORY/ 하위 경로에 배포되므로
 // 배포 워크플로에서 BASE_PATH=/REPOSITORY/ 로 지정한다. 로컬 개발은 '/'.
 const base = process.env.BASE_PATH ?? '/';
+const wordsDataVersion = createHash('sha256')
+  .update(readFileSync(new URL('./public/data/words.csv', import.meta.url)))
+  .digest('hex');
 
 export default defineConfig({
   base,
+  // CSV가 바뀌면 JS 번들도 자동으로 바뀌고, 기존 IndexedDB에 한 번 동기화된다.
+  define: {
+    __WORDS_DATA_VERSION__: JSON.stringify(wordsDataVersion),
+  },
   plugins: [
     react(),
     VitePWA({

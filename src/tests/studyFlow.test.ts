@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase, getMeta, type WordFlipDB } from '../db/database';
 import { META_KEYS } from '../db/schema';
 import { appStore } from '../stores/appStore';
@@ -39,6 +39,30 @@ describe('FSRS 학습 흐름 (store 통합)', () => {
     expect(appStore.getState()).toMatchObject({
       status: 'ready', currentCardId: 'c1', flipped: false,
     });
+  });
+
+  it('새 번들 데이터 버전은 init에서 카드 내용을 갱신하고 현재 위치를 유지한다', async () => {
+    const csv = [
+      'id,word,part_of_speech,korean_meaning,korean_pronunciation,example_sentence,example_translation,category,difficulty,tags,starred',
+      'c1,alpha,noun,갱신된 알파,알파,Alpha works.,알파가 작동한다.,conversation,A1,,false',
+      'c2,beta,noun,베타,베타,Beta works.,베타가 작동한다.,conversation,A1,,true',
+      'c3,gamma,noun,감마,감마,Gamma works.,감마가 작동한다.,conversation,A1,,false',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(csv, { status: 200 })));
+    await db.meta.put({ key: META_KEYS.bundledDataVersion, value: '' });
+    try {
+      appStore.reset();
+      await initApp();
+      expect(appStore.getState().cards.get('c1')).toMatchObject({
+        koreanMeaning: '갱신된 알파',
+      });
+      expect(appStore.getState().currentCardId).toBe('c1');
+      expect(await getMeta(db, META_KEYS.bundledDataVersion, '')).toBe(
+        __WORDS_DATA_VERSION__,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('뒤집기 전에는 네 버튼 평가를 직접 호출해도 기록하지 않는다', async () => {

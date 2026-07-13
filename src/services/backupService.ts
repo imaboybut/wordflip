@@ -131,6 +131,9 @@ export async function restoreBackup(
         setMeta(dbi, META_KEYS.lastUndo, null),
         setMeta(dbi, META_KEYS.studySession, null),
         setMeta(dbi, META_KEYS.fsrsMigrationPending, backup.version === 1),
+        // 복원 파일이 현재 번들의 이전 카드 내용을 담았을 수 있어 다음 init에서
+        // 내장 CSV를 비파괴 동기화하도록 한다.
+        setMeta(dbi, META_KEYS.bundledDataVersion, ''),
       ]);
     },
   );

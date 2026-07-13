@@ -151,10 +151,7 @@ export async function importCards(
   return { added, updated, skipped, progressPreserved };
 }
 
-/**
- * 첫 실행 시에만 public/data/words.csv를 IndexedDB로 시딩한다.
- * 이미 카드가 있으면 아무것도 하지 않는다 (중복 삽입 방지).
- */
+/** 첫 실행 테스트/외부 호출 호환용 시딩 함수. */
 export async function seedIfEmpty(
   dbi: WordFlipDB,
   csvUrl: string,
@@ -162,25 +159,91 @@ export async function seedIfEmpty(
   const count = await dbi.cards.count();
   if (count > 0) return null;
 
-  const res = await fetch(csvUrl);
+  return syncBundledCards(dbi, csvUrl, 'initial-seed');
+}
+
+/**
+ * 빌드에 포함된 CSV가 바뀐 경우에만 IndexedDB의 같은 id 카드를 갱신한다.
+ * 별표와 모든 학습 테이블은 그대로 두며, 사용자 추가 카드는 삭제하지 않는다.
+ */
+export async function syncBundledCards(
+  dbi: WordFlipDB,
+  csvUrl: string,
+  dataVersion: string,
+): Promise<SeedReport | null> {
+  const [count, storedVersion] = await Promise.all([
+    dbi.cards.count(),
+    getMeta(dbi, META_KEYS.bundledDataVersion, ''),
+  ]);
+  if (count > 0 && storedVersion === dataVersion) return null;
+
+  let res: Response;
+  try {
+    res = await fetch(csvUrl);
+  } catch (error) {
+    // 기존 덱이 있으면 오프라인 시작을 막지 않고 다음 실행에서 재시도한다.
+    if (count > 0) return null;
+    throw error;
+  }
   if (!res.ok) {
+    if (count > 0) return null;
     throw new Error(`초기 단어 데이터를 불러오지 못했습니다 (HTTP ${res.status})`);
   }
   const text = await res.text();
   const parsed = parseWordsCsv(text);
-  if (parsed.cards.length === 0) {
-    throw new Error('초기 단어 데이터가 비어 있습니다.');
+  if (parsed.cards.length === 0 || parsed.errors.length > 0) {
+    if (count > 0) return null;
+    throw new Error(
+      parsed.cards.length === 0
+        ? '초기 단어 데이터가 비어 있습니다.'
+        : `초기 단어 데이터에 오류가 있습니다 (${parsed.errors.length}건).`,
+    );
   }
 
   await dbi.transaction('rw', [dbi.cards, dbi.meta], async () => {
-    await dbi.cards.bulkAdd(parsed.cards);
+    const existing = await dbi.cards.toArray();
+    const byId = new Map(existing.map((card) => [card.id, card]));
+    const byWord = new Map(
+      existing.map((card) => [normalizeWord(card.word), card]),
+    );
+    const skipped = [...parsed.errors];
+    const cards: Card[] = [];
+    let nextOrder = existing.reduce(
+      (maximum, card) => Math.max(maximum, card.orderIndex),
+      -1,
+    ) + 1;
+    parsed.cards.forEach((card, index) => {
+      const previous = byId.get(card.id);
+      if (previous) {
+        cards.push({
+          ...card,
+          // 별표와 기존 덱 위치는 사용자 상태이므로 CSV 갱신에서 보존한다.
+          starred: card.starred || previous.starred,
+          orderIndex: previous.orderIndex,
+        });
+        return;
+      }
+      const sameWord = byWord.get(normalizeWord(card.word));
+      if (sameWord) {
+        skipped.push({
+          row: index + 2,
+          reason: `사용자 카드와 같은 단어라 내장 카드 추가를 건너뜀: "${card.word}"`,
+        });
+        return;
+      }
+      cards.push({ ...card, orderIndex: nextOrder++ });
+    });
+    await dbi.cards.bulkPut(cards);
     const report: SeedReport = {
-      imported: parsed.cards.length,
-      skipped: parsed.errors,
+      imported: cards.length,
+      skipped,
       total: parsed.cards.length + parsed.errors.length,
       finishedAt: new Date().toISOString(),
     };
-    await setMeta(dbi, META_KEYS.seedReport, report);
+    await Promise.all([
+      setMeta(dbi, META_KEYS.seedReport, report),
+      setMeta(dbi, META_KEYS.bundledDataVersion, dataVersion),
+    ]);
   });
 
   return getMeta<SeedReport | null>(dbi, META_KEYS.seedReport, null);

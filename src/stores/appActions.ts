@@ -13,7 +13,11 @@ import {
   rebuildSchedulesFromLogs,
   undoLastReview,
 } from '../services/reviewService';
-import { seedIfEmpty, importCards, type ImportOptions } from '../services/importService';
+import {
+  importCards,
+  syncBundledCards,
+  type ImportOptions,
+} from '../services/importService';
 import { parseWordsCsv } from '../services/csvService';
 import { restoreBackup, wipeAllData } from '../services/backupService';
 import { appStore, type AppState } from './appStore';
@@ -47,7 +51,11 @@ export async function initApp(): Promise<void> {
     setState({ status: 'loading', errorMessage: null });
 
     const seedUrl = `${import.meta.env.BASE_URL}data/words.csv`;
-    const seedReport = await seedIfEmpty(activeDb, seedUrl);
+    const seedReport = await syncBundledCards(
+      activeDb,
+      seedUrl,
+      __WORDS_DATA_VERSION__,
+    );
     // v1/v2의 step 스케줄은 reviewLogs.reviewedAt을 실제 시간 입력으로 사용해
     // FSRS 상태로 한 번만 변환한다.
     await migrateLegacySchedulesToFsrs(activeDb);
@@ -466,6 +474,11 @@ export async function importCsvText(
 export async function restoreBackupJson(text: string): Promise<string> {
   const data: unknown = JSON.parse(text);
   const result = await restoreBackup(activeDb, data);
+  await syncBundledCards(
+    activeDb,
+    `${import.meta.env.BASE_URL}data/words.csv`,
+    __WORDS_DATA_VERSION__,
+  );
   await reloadFromDb();
   return `복원 완료: 카드 ${result.cards}개, 학습 기록 ${result.reviewLogs}건`;
 }

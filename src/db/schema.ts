@@ -22,6 +22,7 @@ export const META_KEYS = {
   lastUndo: 'lastUndo',
   newOrderSeed: 'newOrderSeed',
   fsrsMigrationPending: 'fsrsMigrationPending',
+  bundledDataVersion: 'bundledDataVersion',
 } as const;
 
 /** 화면이 꺼졌다 켜져도 학습 위치를 복원하기 위한 세션 상태 */
