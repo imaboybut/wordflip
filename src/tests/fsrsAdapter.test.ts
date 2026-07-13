@@ -18,20 +18,29 @@ describe('FSRS adapter', () => {
 
     expect(defaults.desiredRetention).toBe(0.9);
     expect(defaults.enableFuzz).toBe(true);
-    expect(defaults.learningSteps).toEqual(['10m']);
-    expect(defaults.relearningSteps).toEqual(['10m']);
+    expect(defaults.learningSteps).toEqual(['30m']);
+    expect(defaults.relearningSteps).toEqual(['30m']);
     expect(createFsrsAdapter(-1).desiredRetention).toBe(0.8);
     expect(createFsrsAdapter(2).desiredRetention).toBe(0.97);
   });
 
-  it('uses the Anki-style 10-minute learning step and graduates Good to days', () => {
+  it('Again 30분·Hard 2시간 하한을 적용하고 Good은 일 단위로 졸업한다', () => {
     const adapter = createFsrsAdapter(0.9, { enableFuzz: false });
     const preview = adapter.preview(null, START);
 
-    expect(preview.again.card.dueAt - START).toBe(10 * MINUTE_MS);
-    expect(preview.hard.card.dueAt - START).toBe(15 * MINUTE_MS);
+    expect(preview.again.card.dueAt - START).toBe(30 * MINUTE_MS);
+    expect(preview.hard.card.dueAt - START).toBe(2 * 60 * MINUTE_MS);
     expect(preview.good.card.dueAt - START).toBeGreaterThanOrEqual(DAY_MS);
     expect(preview.good.card.state).toBe('review');
+  });
+
+  it('FSRS가 2시간보다 긴 Hard 간격을 계산하면 단축하지 않는다', () => {
+    const adapter = createFsrsAdapter(0.9, { enableFuzz: false });
+    const learned = adapter.rate(null, 'good', START).card;
+    const reviewedAt = learned.dueAt;
+    const hard = adapter.rate(learned, 'hard', reviewedAt).card;
+
+    expect(hard.dueAt).toBeGreaterThan(reviewedAt + 2 * 60 * MINUTE_MS);
   });
 
   it('previews all four ratings in increasing interval order for a new card', () => {

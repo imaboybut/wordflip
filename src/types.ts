@@ -31,7 +31,7 @@ export interface CardSchedule {
   lapses: number;
   state: 'new' | 'learning' | 'review' | 'relearning';
   lastReviewAt: number | null;
-  /** Again 카드의 너무 빠른 재등장을 막는 최소 누적 평가 횟수. */
+  /** Again/Hard 카드의 너무 빠른 재등장을 막는 최소 누적 평가 횟수. */
   minReviewStep: number;
   lastRating: Rating | null;
   algorithm: 'fsrs-6';

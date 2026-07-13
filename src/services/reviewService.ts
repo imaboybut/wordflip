@@ -17,11 +17,21 @@ import {
 import { getMeta, setMeta, type WordFlipDB } from '../db/database';
 import { META_KEYS, type StudySession } from '../db/schema';
 import { uid } from '../utils/uid';
+import {
+  nextReviewStreak,
+  normalizeReviewStreak,
+  ratingCardGap,
+} from '../scheduler/reviewPolicy';
+
+export {
+  MAX_AGAIN_CARD_GAP,
+  MAX_HARD_CARD_GAP,
+  MIN_AGAIN_CARD_GAP,
+  MIN_HARD_CARD_GAP,
+} from '../scheduler/reviewPolicy';
 
 const MAX_RECENT_KEPT = 30;
 const CURRENT_SCHEDULER_VERSION = 3 as const;
-export const MIN_AGAIN_CARD_GAP = 12;
-export const MAX_AGAIN_CARD_GAP = 24;
 
 export interface ApplyRatingOptions {
   /** 평가와 한 트랜잭션으로 저장할 다음 화면 상태 */
@@ -48,6 +58,8 @@ interface UndoSnapshot {
   prevStudyStep: number;
   prevRecentIds: string[];
   prevReviewStreak: number;
+  /** 옛 snapshot에는 없으므로 undo 시 true 여부만 사용한다. */
+  reviewedWasDue?: boolean;
   prevRatingCounts: RatingCounts;
   prevStudyMode: StudySession['mode'] | null;
 }
@@ -58,6 +70,7 @@ export interface UndoOutcome {
   studyStep: number;
   recentIds: string[];
   reviewStreak: number;
+  wasDueReview: boolean;
   ratingCounts: RatingCounts;
   studyMode: StudySession['mode'] | null;
 }
@@ -74,13 +87,13 @@ export function isRatingInFlight(): boolean {
 
 /**
  * 평가 1회를 원자적으로 처리한다. studyStep은 이제 시간 간격 계산에 쓰지 않고,
- * 누적 평가 횟수와 Again 카드의 최소 카드 간격에만 사용한다.
+ * 누적 평가 횟수와 Again/Hard 카드의 최소 카드 간격에만 사용한다.
  */
 export async function applyRating(
   dbi: WordFlipDB,
   cardId: string,
   rating: Rating,
-  _wasDueReview: boolean,
+  wasDueReview: boolean,
   options: ApplyRatingOptions = {},
 ): Promise<ReviewOutcome> {
   if (ratingInFlight) throw new Error('이전 평가가 아직 처리 중입니다.');
@@ -106,9 +119,7 @@ export async function applyRating(
         const rated = adapter.rate(prev, rating, nowMs);
         const logId = uid();
         const minReviewStep =
-          rating === 'again'
-            ? stepAfter + deterministicAgainGap(`${logId}:${cardId}:${nowMs}`)
-            : stepAfter;
+          stepAfter + ratingCardGap(rating, `${logId}:${cardId}:${nowMs}`);
         const schedule: CardSchedule = {
           cardId,
           ...rated.card,
@@ -135,9 +146,7 @@ export async function applyRating(
           -MAX_RECENT_KEPT,
         );
         const prevStreak = await getMeta(dbi, META_KEYS.reviewStreak, 0);
-        // FSRS 큐는 streak로 신규 카드를 강제 삽입하지 않는다. 옛 meta 키는
-        // 백업 호환을 위해 0으로 유지한다.
-        const reviewStreak = 0;
+        const reviewStreak = nextReviewStreak(prevStreak, wasDueReview);
         const prevCounts = await getMeta<RatingCounts>(
           dbi,
           META_KEYS.ratingCounts,
@@ -154,7 +163,8 @@ export async function applyRating(
           prevSchedule: prev,
           prevStudyStep: stepBefore,
           prevRecentIds: prevRecent,
-          prevReviewStreak: safeNonNegativeInteger(prevStreak),
+          prevReviewStreak: normalizeReviewStreak(prevStreak),
+          reviewedWasDue: wasDueReview,
           prevRatingCounts: { ...EMPTY_RATING_COUNTS, ...prevCounts },
           prevStudyMode: options.studySession?.mode ?? null,
         };
@@ -200,6 +210,7 @@ export async function undoLastReview(
       const undo = await getMeta<UndoSnapshot | null>(dbi, META_KEYS.lastUndo, null);
       if (undo === null) return null;
       const restoredMode = undo.prevStudyMode ?? options.studyMode ?? null;
+      const wasDueReview = undo.reviewedWasDue === true;
 
       if (undo.prevSchedule === null) await dbi.schedules.delete(undo.cardId);
       else await dbi.schedules.put(undo.prevSchedule);
@@ -218,7 +229,7 @@ export async function undoLastReview(
             mode: restoredMode,
             currentCardId: undo.cardId,
             flipped: false,
-            currentWasDue: false,
+            currentWasDue: wasDueReview,
           } satisfies StudySession),
         );
       }
@@ -230,6 +241,7 @@ export async function undoLastReview(
         studyStep: undo.prevStudyStep,
         recentIds: undo.prevRecentIds,
         reviewStreak: undo.prevReviewStreak,
+        wasDueReview,
         ratingCounts: undo.prevRatingCounts,
         studyMode: restoredMode,
       };
@@ -360,12 +372,13 @@ export async function rebuildSchedulesFromLogs(
         setMeta(dbi, META_KEYS.studyStep, studyStep),
         setMeta(dbi, META_KEYS.ratingCounts, counts),
         setMeta(dbi, META_KEYS.lastUndo, null),
+        // 로그에는 당시 카드가 due 큐에서 선택됐는지 기록되지 않으므로 안전하게 초기화한다.
+        setMeta(dbi, META_KEYS.reviewStreak, 0),
       ];
       if (options.finishMigration) {
         metaWrites.push(
           setMeta(dbi, META_KEYS.fsrsMigrationPending, false),
           setMeta(dbi, META_KEYS.studySession, null),
-          setMeta(dbi, META_KEYS.reviewStreak, 0),
         );
       }
       await Promise.all(metaWrites);
@@ -411,16 +424,6 @@ function compareLogs(a: ReviewLog, b: ReviewLog): number {
 function reviewTimestamp(log: ReviewLog): number {
   const parsed = Date.parse(log.reviewedAt);
   return Number.isFinite(parsed) ? parsed : safeNonNegativeInteger(log.stepAfter);
-}
-
-function deterministicAgainGap(seed: string): number {
-  let hash = 2_166_136_261;
-  for (let i = 0; i < seed.length; i += 1) {
-    hash ^= seed.charCodeAt(i);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  const width = MAX_AGAIN_CARD_GAP - MIN_AGAIN_CARD_GAP + 1;
-  return MIN_AGAIN_CARD_GAP + ((hash >>> 0) % width);
 }
 
 function normalizeSettings(settings: Settings): Settings {

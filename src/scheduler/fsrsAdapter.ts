@@ -8,6 +8,7 @@ import {
   type RecordLogItem as NativeRecordLogItem,
   type ReviewLog as NativeReviewLog,
 } from 'ts-fsrs';
+import { enforceMinimumRatingDelay } from './reviewPolicy';
 
 export const DEFAULT_DESIRED_RETENTION = 0.9;
 /** WordFlip UI policy: Anki warns that values above 0.97 can be overwhelming. */
@@ -15,8 +16,8 @@ export const MIN_DESIRED_RETENTION = 0.8;
 export const MAX_DESIRED_RETENTION = 0.97;
 export const MAXIMUM_INTERVAL_DAYS = 36_500;
 export const MAX_SAFE_TIMESTAMP_MS = 8_640_000_000_000_000;
-export const DEFAULT_LEARNING_STEPS = ['10m'] as const;
-export const DEFAULT_RELEARNING_STEPS = ['10m'] as const;
+export const DEFAULT_LEARNING_STEPS = ['30m'] as const;
+export const DEFAULT_RELEARNING_STEPS = ['30m'] as const;
 
 const MAX_COUNT = 2_147_483_647;
 
@@ -78,9 +79,9 @@ export interface FsrsReplayResult {
 export interface FsrsAdapterOptions {
   /** Production should leave this enabled; tests can explicitly disable it. */
   enableFuzz?: boolean;
-  /** Anki-style 10-minute learning step by default. Pass [] for pure FSRS. */
+  /** 30-minute learning step by default. []여도 WordFlip 시간 하한은 유지된다. */
   learningSteps?: readonly FsrsStep[];
-  /** Anki-style 10-minute relearning step by default. Pass [] to disable. */
+  /** 30-minute relearning step by default. []여도 WordFlip 시간 하한은 유지된다. */
   relearningSteps?: readonly FsrsStep[];
 }
 
@@ -278,6 +279,25 @@ function resultToStored(result: NativeRecordLogItem): FsrsRatingResult {
   };
 }
 
+function resultToStoredWithPolicy(
+  result: NativeRecordLogItem,
+  rating: FsrsRating,
+  reviewedAt: number,
+): FsrsRatingResult {
+  const stored = resultToStored(result);
+  return {
+    ...stored,
+    card: {
+      ...stored.card,
+      dueAt: enforceMinimumRatingDelay(
+        stored.card.dueAt,
+        reviewedAt,
+        rating,
+      ),
+    },
+  };
+}
+
 export class FsrsAdapter {
   readonly desiredRetention: number;
   readonly enableFuzz: boolean;
@@ -317,10 +337,26 @@ export class FsrsAdapter {
     const reviewedAt = this.monotonicReviewTime(card, at);
     const preview = this.scheduler.repeat(card, new Date(reviewedAt));
     return {
-      again: resultToStored(preview[NativeRating.Again]),
-      hard: resultToStored(preview[NativeRating.Hard]),
-      good: resultToStored(preview[NativeRating.Good]),
-      easy: resultToStored(preview[NativeRating.Easy]),
+      again: resultToStoredWithPolicy(
+        preview[NativeRating.Again],
+        'again',
+        reviewedAt,
+      ),
+      hard: resultToStoredWithPolicy(
+        preview[NativeRating.Hard],
+        'hard',
+        reviewedAt,
+      ),
+      good: resultToStoredWithPolicy(
+        preview[NativeRating.Good],
+        'good',
+        reviewedAt,
+      ),
+      easy: resultToStoredWithPolicy(
+        preview[NativeRating.Easy],
+        'easy',
+        reviewedAt,
+      ),
     };
   }
 
@@ -332,9 +368,12 @@ export class FsrsAdapter {
     const at = safeTimestamp(now, Date.now());
     const card = this.cardForReview(stored, at);
     const reviewedAt = this.monotonicReviewTime(card, at);
-    const nativeRating = RATING_TO_NATIVE[normalizeRating(rating)];
-    return resultToStored(
+    const normalizedRating = normalizeRating(rating);
+    const nativeRating = RATING_TO_NATIVE[normalizedRating];
+    return resultToStoredWithPolicy(
       this.scheduler.next(card, new Date(reviewedAt), nativeRating),
+      normalizedRating,
+      reviewedAt,
     );
   }
 

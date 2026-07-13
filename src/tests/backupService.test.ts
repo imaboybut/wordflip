@@ -36,18 +36,21 @@ describe('JSON 백업/복원', () => {
   });
 
   it('백업 → 복원 round-trip으로 모든 학습 상태가 보존된다', async () => {
+    await db.meta.put({ key: META_KEYS.reviewStreak, value: 2 });
     const backup = await exportBackup(db);
     expect(backup.version).toBe(2);
     expect(backup.cards).toHaveLength(2);
     expect(backup.schedules).toHaveLength(2);
     expect(backup.reviewLogs).toHaveLength(2);
     expect(backup.studyStep).toBe(2);
+    expect(backup.reviewStreak).toBe(2);
 
     const db2 = createDatabase(uniqueDbName());
     try {
       const result = await restoreBackup(db2, JSON.parse(JSON.stringify(backup)));
       expect(result).toEqual({ cards: 2, schedules: 2, reviewLogs: 2 });
       expect(await getMeta(db2, META_KEYS.studyStep, -1)).toBe(2);
+      expect(await getMeta(db2, META_KEYS.reviewStreak, -1)).toBe(2);
       expect(await db2.cards.get('c1')).toMatchObject({
         word: 'alpha',
         starred: true,
@@ -125,7 +128,7 @@ describe('JSON 백업/복원', () => {
       expect(schedule).toMatchObject({
         algorithm: 'fsrs-6', lastRating: 'again', state: 'learning',
       });
-      expect(schedule?.dueAt).toBe(Date.parse('2026-01-01T00:10:00.000Z'));
+      expect(schedule?.dueAt).toBe(Date.parse('2026-01-01T00:30:00.000Z'));
       expect((await getMeta(target, META_KEYS.settings, DEFAULT_SETTINGS)).desiredRetention)
         .toBe(0.9);
     } finally {

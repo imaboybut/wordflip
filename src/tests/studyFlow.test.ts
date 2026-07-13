@@ -13,7 +13,7 @@ import {
   toggleStar,
   undoLast,
 } from '../stores/appActions';
-import { makeCard, uniqueDbName } from './helpers';
+import { makeCard, makeSchedule, uniqueDbName } from './helpers';
 
 describe('FSRS 학습 흐름 (store 통합)', () => {
   let db: WordFlipDB;
@@ -98,18 +98,62 @@ describe('FSRS 학습 흐름 (store 통합)', () => {
     expect(await db.reviewLogs.count()).toBe(0);
   });
 
-  it('답 공개 후 Again을 선택하면 다음 카드로 가며 10분 전 재등장하지 않는다', async () => {
+  it('답 공개 후 Again을 선택하면 다음 카드로 가며 30분 전 재등장하지 않는다', async () => {
     const before = Date.now();
     await revealCurrentCardAsUnknown();
     await rateCurrentCard('again');
     const schedule = appStore.getState().schedules.get('c1');
-    expect(schedule?.dueAt).toBeGreaterThanOrEqual(before + 9 * 60_000);
+    expect(schedule?.dueAt).toBeGreaterThanOrEqual(before + 29 * 60_000);
     expect(appStore.getState().currentCardId).toBe('c2');
 
     await markCurrentCardKnown();
     expect(appStore.getState().currentCardId).toBe('c3');
     await markCurrentCardKnown();
     expect(appStore.getState().currentCardId).toBeNull();
+  });
+
+  it('due 복습 두 장 뒤에는 신규 한 장을 강제로 섞고 streak를 초기화한다', async () => {
+    const dueAt = Date.now() - 60_000;
+    const lastReviewAt = dueAt - 10 * 86_400_000;
+    await db.schedules.bulkPut([
+      makeSchedule({ cardId: 'c1', dueAt, lastReviewAt }),
+      makeSchedule({ cardId: 'c2', dueAt, lastReviewAt }),
+    ]);
+    await db.meta.put({ key: META_KEYS.studySession, value: null });
+    appStore.reset();
+    await initApp();
+
+    expect(appStore.getState().currentCardId).toBe('c1');
+    flipCard();
+    await rateCurrentCard('good');
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c2', reviewStreak: 1, currentWasDue: true,
+    });
+
+    flipCard();
+    await rateCurrentCard('good');
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c3', reviewStreak: 2, currentWasDue: false,
+    });
+
+    await undoLast();
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c2', reviewStreak: 1, currentWasDue: true,
+    });
+    flipCard();
+    await rateCurrentCard('good');
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c3', reviewStreak: 2, currentWasDue: false,
+    });
+
+    appStore.reset();
+    await initApp();
+    expect(appStore.getState()).toMatchObject({
+      currentCardId: 'c3', reviewStreak: 2, currentWasDue: false,
+    });
+
+    await markCurrentCardKnown();
+    expect(appStore.getState().reviewStreak).toBe(0);
   });
 
   it('빠른 연속 평가는 한 번만 기록된다', async () => {

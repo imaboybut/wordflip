@@ -15,6 +15,7 @@ function ctx(overrides: Partial<SelectorContext>): SelectorContext {
   return {
     nowMs: NOW,
     studyStep: 100,
+    reviewStreak: 0,
     schedules: new Map<string, CardSchedule>(),
     deckIds: [],
     newIds: [],
@@ -68,6 +69,50 @@ describe('FSRS 실시간 큐 선택', () => {
       nextDueAt: null,
       nextReviewStep: null,
     });
+  });
+
+  it('연속 복습 2장 뒤에는 due 학습 카드보다 신규 한 장을 우선한다', () => {
+    const result = selectNextCard(
+      ctx({
+        reviewStreak: 2,
+        schedules: scheduleMap([
+          makeSchedule({ cardId: 'due-learning', state: 'relearning' }),
+        ]),
+        deckIds: ['due-learning', 'new'],
+        newIds: ['new'],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      cardId: 'new',
+      isDueReview: false,
+      isNew: true,
+    });
+  });
+
+  it('연속 복습이 1장이면 기존처럼 due 카드를 우선한다', () => {
+    const result = selectNextCard(
+      ctx({
+        reviewStreak: 1,
+        schedules: scheduleMap([makeSchedule({ cardId: 'due' })]),
+        deckIds: ['due', 'new'],
+        newIds: ['new'],
+      }),
+    );
+
+    expect(result).toMatchObject({ cardId: 'due', isDueReview: true });
+  });
+
+  it('연속 복습 2장 뒤라도 신규가 없으면 due 복습을 계속한다', () => {
+    const result = selectNextCard(
+      ctx({
+        reviewStreak: 2,
+        schedules: scheduleMap([makeSchedule({ cardId: 'due' })]),
+        deckIds: ['due'],
+      }),
+    );
+
+    expect(result).toMatchObject({ cardId: 'due', isDueReview: true });
   });
 
   it('FSRS 시간이 오지 않은 카드는 절대 일찍 다시 꺼내지 않는다', () => {

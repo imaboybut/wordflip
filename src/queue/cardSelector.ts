@@ -1,6 +1,10 @@
 import { createFsrsAdapter, type FsrsAdapter } from '../scheduler/fsrsAdapter';
 import type { CardSchedule } from '../types';
 import type { SelectionResult, SelectorContext } from './queueTypes';
+import {
+  REVIEWS_BEFORE_FORCED_NEW,
+  normalizeReviewStreak,
+} from '../scheduler/reviewPolicy';
 
 const adapterCache = new Map<number, FsrsAdapter>();
 
@@ -9,13 +13,15 @@ const adapterCache = new Map<number, FsrsAdapter>();
  *
  * - dueAt 시간 바닥과 minReviewStep 간격을 모두 지킨다.
  * - 학습/재학습 카드를 먼저, 일반 복습 카드는 낮은 회상 가능성 순으로 고른다.
- * - 예정 카드가 없으면 신규 카드를 고른다.
+ * - 연속 복습 2장 뒤에는 신규가 남아 있으면 한 장을 강제로 섞는다.
+ * - 그 외에는 예정 카드가 없을 때 신규 카드를 고른다.
  * - 둘 다 없으면 미래 카드를 억지로 꺼내지 않고 다음 예정 시각만 돌려준다.
  */
 export function selectNextCard(ctx: SelectorContext): SelectionResult {
   const {
     nowMs,
     studyStep,
+    reviewStreak,
     schedules,
     deckIds,
     newIds,
@@ -77,6 +83,23 @@ export function selectNextCard(ctx: SelectorContext): SelectionResult {
     );
   }
 
+  const newPick = selectNewCard(newIds, deckSet, avoid, currentCardId);
+
+  // 복습 backlog가 신규를 영원히 가리지 않도록 due 복습 두 장 뒤에는 신규
+  // 한 장을 먼저 제시한다. 현재 모드에 신규가 없으면 due 처리를 계속한다.
+  if (
+    newPick !== null &&
+    normalizeReviewStreak(reviewStreak) >= REVIEWS_BEFORE_FORCED_NEW
+  ) {
+    return {
+      cardId: newPick,
+      isDueReview: false,
+      isNew: true,
+      nextDueAt: null,
+      nextReviewStep: null,
+    };
+  }
+
   // 최근/현재 카드는 대안이 있을 때 피한다. 학습/재학습의 우선순위는
   // 유지하되, 그 묶음이 전부 회피 대상이면 일반 복습의 새 카드를 택한다.
   const duePick = pickDueCandidate(dueCandidates);
@@ -90,7 +113,6 @@ export function selectNextCard(ctx: SelectorContext): SelectionResult {
     };
   }
 
-  const newPick = selectNewCard(newIds, deckSet, avoid, currentCardId);
   if (newPick !== null) {
     return {
       cardId: newPick,
@@ -102,7 +124,7 @@ export function selectNextCard(ctx: SelectorContext): SelectionResult {
   }
 
   // 한 장짜리/별표 덱처럼 대안이 전혀 없으면 step gate만 완화한다.
-  // dueAt 시간 바닥은 이미 지났으므로 10분 전 즉시 반복은 생기지 않는다.
+  // dueAt 시간 바닥은 이미 지났으므로 30분/2시간 전 반복은 생기지 않는다.
   const gatedPick = pickDueCandidate(stepGatedCandidates);
   if (gatedPick !== null) {
     return {

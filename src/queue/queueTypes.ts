@@ -5,6 +5,8 @@ export interface SelectorContext {
   nowMs: number;
   /** 평가 횟수 기반 최소 간격 gate. FSRS 날짜 계산에는 사용하지 않는다. */
   studyStep: number;
+  /** 연속으로 완료한 due 복습 수. 2장이면 신규 한 장을 우선한다. */
+  reviewStreak: number;
   /** 평가된 적 있는 카드들의 FSRS 스케줄 (cardId → schedule) */
   schedules: ReadonlyMap<string, CardSchedule>;
   /** 현재 모드에서 학습 대상인 카드 id 목록 (덱 순서) */

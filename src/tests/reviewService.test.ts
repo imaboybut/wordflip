@@ -3,7 +3,9 @@ import { createDatabase, getMeta, type WordFlipDB } from '../db/database';
 import { META_KEYS } from '../db/schema';
 import {
   MAX_AGAIN_CARD_GAP,
+  MAX_HARD_CARD_GAP,
   MIN_AGAIN_CARD_GAP,
+  MIN_HARD_CARD_GAP,
   applyRating,
   migrateLegacySchedulesToFsrs,
   rebuildSchedulesFromLogs,
@@ -13,6 +15,7 @@ import { makeCard, uniqueDbName } from './helpers';
 
 const START = Date.parse('2026-07-12T12:00:00.000Z');
 const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 86_400_000;
 const fixed = (nowMs: number) => ({ nowMs, enableFuzz: false });
 
@@ -64,19 +67,34 @@ describe('FSRS 복습 트랜잭션', () => {
     expect(await getMeta(db, META_KEYS.ratingCounts, null)).toMatchObject({ good: 1 });
   });
 
-  it('Again은 10분 시간 바닥과 12~24장 무작위 최소 간격을 함께 저장한다', async () => {
+  it('Again은 30분 시간 바닥과 12~24회 무작위 최소 간격을 함께 저장한다', async () => {
     const outcome = await applyRating(db, 'c1', 'again', false, fixed(START));
     const cardGap = outcome.schedule.minReviewStep - outcome.studyStep;
-    expect(outcome.schedule.dueAt).toBe(START + 10 * MINUTE_MS);
+    expect(outcome.schedule.dueAt).toBe(START + 30 * MINUTE_MS);
     expect(outcome.schedule.state).toBe('learning');
     expect(cardGap).toBeGreaterThanOrEqual(MIN_AGAIN_CARD_GAP);
     expect(cardGap).toBeLessThanOrEqual(MAX_AGAIN_CARD_GAP);
   });
 
-  it('옛 reviewStreak은 FSRS 선택에 쓰지 않고 0으로 정리한다', async () => {
-    await db.meta.put({ key: META_KEYS.reviewStreak, value: 10 });
-    await applyRating(db, 'c1', 'good', true, fixed(START));
-    expect(await getMeta(db, META_KEYS.reviewStreak, -1)).toBe(0);
+  it('Hard는 2시간 시간 바닥과 30~50회 무작위 최소 간격을 함께 저장한다', async () => {
+    const outcome = await applyRating(db, 'c1', 'hard', false, fixed(START));
+    const cardGap = outcome.schedule.minReviewStep - outcome.studyStep;
+    expect(outcome.schedule.dueAt).toBe(START + 2 * HOUR_MS);
+    expect(outcome.schedule.state).toBe('learning');
+    expect(cardGap).toBeGreaterThanOrEqual(MIN_HARD_CARD_GAP);
+    expect(cardGap).toBeLessThanOrEqual(MAX_HARD_CARD_GAP);
+  });
+
+  it('due 복습은 streak를 2까지 올리고 신규 평가는 0으로 되돌린다', async () => {
+    const first = await applyRating(db, 'c1', 'good', true, fixed(START));
+    const second = await applyRating(db, 'c2', 'good', true, fixed(START + 1));
+    const saturated = await applyRating(db, 'c1', 'good', true, fixed(START + 2));
+    const reset = await applyRating(db, 'c2', 'good', false, fixed(START + 3));
+
+    expect(first.reviewStreak).toBe(1);
+    expect(second.reviewStreak).toBe(2);
+    expect(saturated.reviewStreak).toBe(2);
+    expect(reset.reviewStreak).toBe(0);
   });
 
   it('평가와 다음 화면 세션을 같은 트랜잭션에서 저장한다', async () => {
@@ -104,6 +122,16 @@ describe('FSRS 복습 트랜잭션', () => {
     expect(await undoLastReview(db)).toBeNull();
   });
 
+  it('due 복습을 되돌리면 이전 streak와 due 여부를 함께 복원한다', async () => {
+    await db.meta.put({ key: META_KEYS.reviewStreak, value: 1 });
+    await applyRating(db, 'c1', 'good', true, fixed(START));
+    const undone = await undoLastReview(db);
+
+    expect(undone).toMatchObject({ reviewStreak: 1, wasDueReview: true });
+    expect(await getMeta(db, META_KEYS.reviewStreak, -1)).toBe(1);
+    expect(await getMeta(db, META_KEYS.studySession, null)).toBeNull();
+  });
+
   it('기존 카드의 마지막 평가를 되돌리면 정확한 FSRS snapshot을 복원한다', async () => {
     await applyRating(db, 'c1', 'good', false, fixed(START));
     const first = await db.schedules.get('c1');
@@ -117,12 +145,14 @@ describe('FSRS 복습 트랜잭션', () => {
     await applyRating(db, 'c2', 'again', false, fixed(START + 1));
     await applyRating(db, 'c1', 'easy', true, fixed(START + 2 * DAY_MS));
     const expected = await db.schedules.toArray();
+    await db.meta.put({ key: META_KEYS.reviewStreak, value: 2 });
     await db.schedules.clear();
 
     const rebuilt = await rebuildSchedulesFromLogs(db);
     const byId = (items: typeof expected) =>
       items.slice().sort((a, b) => a.cardId.localeCompare(b.cardId));
     expect(byId(rebuilt.schedules)).toEqual(byId(expected));
+    expect(await getMeta(db, META_KEYS.reviewStreak, -1)).toBe(0);
   });
 
   it('v1/v2 로그의 실제 reviewedAt을 재생해 FSRS로 마이그레이션한다', async () => {

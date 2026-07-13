@@ -13,6 +13,7 @@ import {
 } from './reviewService';
 import { getMeta, setMeta, type WordFlipDB } from '../db/database';
 import { META_KEYS } from '../db/schema';
+import { normalizeReviewStreak } from '../scheduler/reviewPolicy';
 
 export interface BackupFile {
   app: 'wordflip';
@@ -52,7 +53,9 @@ export async function exportBackup(dbi: WordFlipDB): Promise<BackupFile> {
     studyStep: await getMeta(dbi, META_KEYS.studyStep, 0),
     settings,
     recentIds: await getMeta<string[]>(dbi, META_KEYS.recentIds, []),
-    reviewStreak: 0,
+    reviewStreak: normalizeReviewStreak(
+      await getMeta(dbi, META_KEYS.reviewStreak, 0),
+    ),
     ratingCounts: await getMeta<RatingCounts>(
       dbi,
       META_KEYS.ratingCounts,
@@ -123,7 +126,11 @@ export async function restoreBackup(
         setMeta(dbi, META_KEYS.studyStep, backup.studyStep),
         setMeta(dbi, META_KEYS.settings, settings),
         setMeta(dbi, META_KEYS.recentIds, backup.recentIds ?? []),
-        setMeta(dbi, META_KEYS.reviewStreak, 0),
+        setMeta(
+          dbi,
+          META_KEYS.reviewStreak,
+          normalizeReviewStreak(backup.reviewStreak),
+        ),
         setMeta(dbi, META_KEYS.ratingCounts, {
           ...EMPTY_RATING_COUNTS,
           ...backup.ratingCounts,

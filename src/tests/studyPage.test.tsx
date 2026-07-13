@@ -77,4 +77,16 @@ describe('단순 탭 학습 화면', () => {
     }));
     expect(appStore.getState().schedules.get('c1')?.lastRating).toBe('again');
   });
+
+  it('진단 미리보기는 실제 정책인 Again 30분과 Hard 2시간을 표시한다', async () => {
+    const user = userEvent.setup();
+    appStore.setState({
+      settings: { ...appStore.getState().settings, showDiagnostics: true },
+    });
+    render(<StudyPage />);
+
+    await user.click(screen.getByTestId('study-card'));
+    expect(screen.getByText('30분')).toBeInTheDocument();
+    expect(screen.getByText('2시간')).toBeInTheDocument();
+  });
 });

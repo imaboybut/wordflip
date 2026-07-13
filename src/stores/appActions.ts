@@ -22,6 +22,7 @@ import { parseWordsCsv } from '../services/csvService';
 import { restoreBackup, wipeAllData } from '../services/backupService';
 import { appStore, type AppState } from './appStore';
 import { clampDesiredRetention } from '../scheduler/fsrsAdapter';
+import { normalizeReviewStreak } from '../scheduler/reviewPolicy';
 
 const { getState, setState } = appStore;
 
@@ -95,7 +96,7 @@ export async function initApp(): Promise<void> {
       schedules: new Map(schedules.map((s) => [s.cardId, s])),
       studyStep,
       recentIds,
-      reviewStreak,
+      reviewStreak: normalizeReviewStreak(reviewStreak),
       ratingCounts,
       settings: normalizeSettings(settings),
       newOrderSeed: seed,
@@ -206,6 +207,7 @@ export function advanceToNextCard(): void {
   const result = selectNextCard({
     nowMs: Date.now(),
     studyStep: state.studyStep,
+    reviewStreak: state.reviewStreak,
     schedules: state.schedules,
     deckIds,
     newIds: newIdsFor(state, deckIds),
@@ -356,7 +358,7 @@ export async function undoLast(): Promise<void> {
       ratingCounts: outcome.ratingCounts,
       canUndo: false,
       currentCardId: outcome.cardId,
-      currentWasDue: false,
+      currentWasDue: outcome.wasDueReview,
       flipped: false,
       awaitingAdvance: false,
       nextDueAt: null,
@@ -518,7 +520,7 @@ async function reloadFromDb(): Promise<void> {
     schedules: new Map(schedules.map((s) => [s.cardId, s])),
     studyStep,
     recentIds,
-    reviewStreak,
+    reviewStreak: normalizeReviewStreak(reviewStreak),
     ratingCounts,
     settings: normalizeSettings(settings),
     canUndo: false,
