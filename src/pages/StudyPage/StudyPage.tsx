@@ -169,9 +169,9 @@ export function StudyPage() {
           </div>
         )}
         <p className="study-page__stats">
-          전체 {stats.total.toLocaleString()} · 별표 {stats.starred.toLocaleString()} ·
-          어려운 {stats.difficult.toLocaleString()} · 총 평가{' '}
-          {studyStep.toLocaleString()}
+          전체 {stats.total.toLocaleString()} · 본 단어 {stats.seen.toLocaleString()} ·
+          별표 {stats.starred.toLocaleString()} · 어려운{' '}
+          {stats.difficult.toLocaleString()} · 총 평가 {studyStep.toLocaleString()}
         </p>
       </header>
 
