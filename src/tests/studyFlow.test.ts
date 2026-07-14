@@ -206,6 +206,45 @@ describe('FSRS 학습 흐름 (store 통합)', () => {
     expect((await db.cards.get('c1'))?.starred).toBe(true);
   });
 
+  it('Again/Hard로 평가한 카드만 어려운 단어 모드에 모인다', async () => {
+    // c1은 Again, c2는 Hard, c3는 Good → c1,c2만 어려운 단어
+    flipCard();
+    await rateCurrentCard('again'); // c1
+    flipCard();
+    await rateCurrentCard('hard'); // c2
+    flipCard();
+    await rateCurrentCard('good'); // c3
+
+    expect([...appStore.getState().difficultIds].sort()).toEqual(['c1', 'c2']);
+
+    setStudyMode({ type: 'difficult', browseIndex: 0, browseOrder: 'csv' });
+    const seen = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const id = appStore.getState().currentCardId;
+      expect(id === 'c1' || id === 'c2').toBe(true); // Good만 준 c3는 안 나옴
+      if (id) seen.add(id);
+      flipCard();
+      await rateCurrentCard('good'); // 재평가해도 목록에서 빠지지 않는다
+    }
+    expect(seen).toEqual(new Set(['c1', 'c2']));
+    // 이미 어려운 목록에 있던 카드는 Good을 줘도 그대로 유지된다
+    expect([...appStore.getState().difficultIds].sort()).toEqual(['c1', 'c2']);
+  });
+
+  it('어려운 단어가 없으면 difficult 모드에서 카드가 없다', () => {
+    setStudyMode({ type: 'difficult', browseIndex: 0, browseOrder: 'csv' });
+    expect(appStore.getState().currentCardId).toBeNull();
+  });
+
+  it('어려운 단어 목록은 재시작 후에도 복습 로그에서 복원된다', async () => {
+    flipCard();
+    await rateCurrentCard('again'); // c1
+
+    appStore.reset();
+    await initApp();
+    expect([...appStore.getState().difficultIds]).toEqual(['c1']);
+  });
+
   it('평가 없는 답 공개 상태를 재시작 후 그대로 복원한다', async () => {
     await markCurrentCardKnown();
     await revealCurrentCardAsUnknown();

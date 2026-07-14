@@ -20,6 +20,7 @@ export function StudyPage() {
   const {
     cards,
     schedules,
+    difficultIds,
     studyStep,
     settings,
     mode,
@@ -83,8 +84,15 @@ export function StudyPage() {
   const stats = useMemo(() => {
     let starredCount = 0;
     for (const c of cards.values()) if (c.starred) starredCount += 1;
-    return { total: cards.size, seen: schedules.size, starred: starredCount };
-  }, [cards, schedules]);
+    let difficultCount = 0;
+    for (const id of difficultIds) if (cards.has(id)) difficultCount += 1;
+    return {
+      total: cards.size,
+      seen: schedules.size,
+      starred: starredCount,
+      difficult: difficultCount,
+    };
+  }, [cards, schedules, difficultIds]);
 
   const previews = useMemo(() => {
     if (!settings.showDiagnostics || !card) return null;
@@ -106,6 +114,7 @@ export function StudyPage() {
   const emptyMessage = getEmptyMessage({
     hasCard: card !== undefined,
     cardsSize: cards.size,
+    difficultCount: stats.difficult,
     mode,
     nextDueAt,
     nextReviewStep,
@@ -128,13 +137,13 @@ export function StudyPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={mode.type === 'browse'}
-            className={`mode-tab ${mode.type === 'browse' ? 'mode-tab--active' : ''}`}
+            aria-selected={mode.type === 'difficult'}
+            className={`mode-tab ${mode.type === 'difficult' ? 'mode-tab--active' : ''}`}
             onClick={() =>
-              setStudyMode({ type: 'browse', browseIndex: 0, browseOrder: 'csv' })
+              setStudyMode({ type: 'difficult', browseIndex: 0, browseOrder: 'csv' })
             }
           >
-            전체 둘러보기
+            어려운 단어
           </button>
           <button
             type="button"
@@ -160,8 +169,9 @@ export function StudyPage() {
           </div>
         )}
         <p className="study-page__stats">
-          전체 {stats.total.toLocaleString()} · 본 단어 {stats.seen.toLocaleString()} ·
-          별표 {stats.starred.toLocaleString()} · 총 평가 {studyStep.toLocaleString()}
+          전체 {stats.total.toLocaleString()} · 별표 {stats.starred.toLocaleString()} ·
+          어려운 {stats.difficult.toLocaleString()} · 총 평가{' '}
+          {studyStep.toLocaleString()}
         </p>
       </header>
 
@@ -275,6 +285,7 @@ function DiagnosticsPanel({ cardId }: { cardId: string }) {
 function getEmptyMessage(input: {
   hasCard: boolean;
   cardsSize: number;
+  difficultCount: number;
   mode: ReturnType<typeof useAppState>['mode'];
   nextDueAt: number | null;
   nextReviewStep: number | null;
@@ -283,6 +294,11 @@ function getEmptyMessage(input: {
   if (input.hasCard) return null;
   if (input.cardsSize === 0) {
     return '단어가 없습니다. 데이터 탭에서 CSV를 가져와 주세요.';
+  }
+  if (input.mode.type === 'difficult') {
+    return input.difficultCount === 0
+      ? '아직 어려운 단어가 없습니다. 학습 중 Again(모름)이나 Hard로 평가한 단어가 여기에 모입니다.'
+      : '어려운 단어를 모두 보여드렸습니다.';
   }
   if (input.mode.type === 'starred' && input.nextDueAt === null && input.nextReviewStep === null) {
     return '별표 카드가 없거나 지금 복습할 별표 카드가 없습니다.';

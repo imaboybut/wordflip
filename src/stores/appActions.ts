@@ -61,9 +61,10 @@ export async function initApp(): Promise<void> {
     // FSRS 상태로 한 번만 변환한다.
     await migrateLegacySchedulesToFsrs(activeDb);
 
-    const [cards, schedules] = await Promise.all([
+    const [cards, schedules, difficultIds] = await Promise.all([
       activeDb.cards.toArray(),
       activeDb.schedules.toArray(),
+      loadDifficultIds(activeDb),
     ]);
     const [studyStep, recentIds, reviewStreak, ratingCounts, settings, savedReport, session, newOrderSeed, lastUndo] =
       await Promise.all([
@@ -94,6 +95,7 @@ export async function initApp(): Promise<void> {
       cards: cardMap,
       deckOrder,
       schedules: new Map(schedules.map((s) => [s.cardId, s])),
+      difficultIds,
       studyStep,
       recentIds,
       reviewStreak: normalizeReviewStreak(reviewStreak),
@@ -136,11 +138,22 @@ export async function initApp(): Promise<void> {
 
 // ---------- 카드 선택 ----------
 
+/** 복습 로그를 훑어 한 번이라도 Again/Hard로 평가한 카드 id를 모은다. */
+async function loadDifficultIds(dbi: WordFlipDB): Promise<Set<string>> {
+  const ids = new Set<string>();
+  await dbi.reviewLogs.each((log) => {
+    if (log.rating === 'again' || log.rating === 'hard') ids.add(log.cardId);
+  });
+  return ids;
+}
+
 function eligibleDeckIds(state: AppState, mode: StudyMode): string[] {
   const { deckOrder, cards } = state;
   switch (mode.type) {
     case 'starred':
       return deckOrder.filter((id) => cards.get(id)?.starred);
+    case 'difficult':
+      return deckOrder.filter((id) => state.difficultIds.has(id));
     case 'search': {
       const q = (mode.query ?? '').trim().toLowerCase();
       if (q === '') return [];
@@ -186,7 +199,9 @@ export function advanceToNextCard(): void {
   const state = getState();
   const deckIds = eligibleDeckIds(state, state.mode);
 
-  if (state.mode.type === 'browse') {
+  // browse(전체 둘러보기)와 difficult(어려운 단어)는 FSRS 예정 시각을 기다리지 않고
+  // 해당 목록을 순서대로 계속 순환하며 언제든 넘겨볼 수 있게 한다.
+  if (state.mode.type === 'browse' || state.mode.type === 'difficult') {
     const order =
       state.mode.browseOrder === 'random'
         ? seededShuffle(deckIds, state.newOrderSeed)
@@ -312,8 +327,16 @@ async function commitCurrentRating(
     const schedules = new Map(s.schedules);
     schedules.set(cardId, outcome.schedule);
 
+    // 한 번이라도 Again/Hard로 평가하면 '어려운 단어' 목록에 넣는다.
+    let difficultIds = s.difficultIds;
+    if ((rating === 'again' || rating === 'hard') && !difficultIds.has(cardId)) {
+      difficultIds = new Set(difficultIds);
+      difficultIds.add(cardId);
+    }
+
     setState({
       schedules,
+      difficultIds,
       studyStep: outcome.studyStep,
       recentIds: outcome.recentIds,
       reviewStreak: outcome.reviewStreak,
@@ -321,7 +344,7 @@ async function commitCurrentRating(
       canUndo: true,
     });
 
-    if (s.mode.type === 'browse') {
+    if (s.mode.type === 'browse' || s.mode.type === 'difficult') {
       const mode = { ...s.mode, browseIndex: (s.mode.browseIndex ?? 0) + 1 };
       setState({ mode });
     }
@@ -349,8 +372,12 @@ export async function undoLast(): Promise<void> {
     if (outcome.schedule === null) schedules.delete(outcome.cardId);
     else schedules.set(outcome.cardId, outcome.schedule);
 
+    // 로그 한 건이 사라졌으니 '어려운 단어' 집합을 다시 계산한다.
+    const difficultIds = await loadDifficultIds(activeDb);
+
     setState({
       schedules,
+      difficultIds,
       mode: outcome.studyMode ?? s.mode,
       studyStep: outcome.studyStep,
       recentIds: outcome.recentIds,
@@ -450,9 +477,12 @@ export async function deleteCard(cardId: string): Promise<void> {
   cards.delete(cardId);
   const schedules = new Map(s.schedules);
   schedules.delete(cardId);
+  const difficultIds = new Set(s.difficultIds);
+  difficultIds.delete(cardId);
   setState({
     cards,
     schedules,
+    difficultIds,
     deckOrder: s.deckOrder.filter((id) => id !== cardId),
     canUndo: false,
   });
@@ -498,9 +528,10 @@ export async function rebuildFromLogs(): Promise<string> {
 }
 
 async function reloadFromDb(): Promise<void> {
-  const [cards, schedules] = await Promise.all([
+  const [cards, schedules, difficultIds] = await Promise.all([
     activeDb.cards.toArray(),
     activeDb.schedules.toArray(),
+    loadDifficultIds(activeDb),
   ]);
   const [studyStep, recentIds, reviewStreak, ratingCounts, settings] =
     await Promise.all([
@@ -518,6 +549,7 @@ async function reloadFromDb(): Promise<void> {
       .sort((a, b) => a.orderIndex - b.orderIndex)
       .map((c) => c.id),
     schedules: new Map(schedules.map((s) => [s.cardId, s])),
+    difficultIds,
     studyStep,
     recentIds,
     reviewStreak: normalizeReviewStreak(reviewStreak),

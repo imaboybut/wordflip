@@ -95,13 +95,13 @@ export const DEFAULT_SETTINGS: Settings = {
   desiredRetention: 0.9,
 };
 
-export type StudyModeType = 'mix' | 'browse' | 'starred' | 'search';
+export type StudyModeType = 'mix' | 'browse' | 'starred' | 'search' | 'difficult';
 
 export interface StudyMode {
   type: StudyModeType;
   /** search 모드에서 사용하는 검색어 */
   query?: string;
-  /** browse 모드의 진행 위치 */
+  /** browse/difficult 모드의 순환 진행 위치 */
   browseIndex?: number;
   /** browse 모드 순서 */
   browseOrder?: 'csv' | 'random';

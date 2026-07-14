@@ -19,6 +19,8 @@ export interface AppState {
   /** orderIndex 오름차순 카드 id */
   deckOrder: string[];
   schedules: Map<string, CardSchedule>;
+  /** 한 번이라도 Again(모름) 또는 Hard로 평가한 카드 id 모음. */
+  difficultIds: Set<string>;
 
   studyStep: number;
   recentIds: string[];
@@ -50,6 +52,7 @@ export const initialAppState: AppState = {
   cards: new Map(),
   deckOrder: [],
   schedules: new Map(),
+  difficultIds: new Set(),
   studyStep: 0,
   recentIds: [],
   reviewStreak: 0,
